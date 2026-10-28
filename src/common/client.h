@@ -56,6 +56,7 @@ typedef struct {
     int want;                   // user clicked Use (keep it attached)
     int autorc, release;
     unsigned long long next_try;
+    char name[128], vid[8], pid[8];  // last seen details (shown if the PC drops off for a while)
 } Use;
 
 static Remote g_r[CL_MAXR];
@@ -248,7 +249,16 @@ static void client_tick(void) {
             for (int k = 0; k < r->naddr; k++) if (!strcmp(r->addr[k].ip, ips[i])) r->addr[k].ok = ok;
             if (ok && !pr.id[0] && pr.name[0] == 0 && !r->name[0]) snprintf(r->name, sizeof r->name, "%s", ips[i]);
             r->via = rm_pick(r);
-            if (ok && r->via >= 0 && !strcmp(r->addr[r->via].ip, ips[i])) { r->ndev = pr.ndev; memcpy(r->dev, pr.dev, sizeof pr.dev); }
+            if (ok && r->via >= 0 && !strcmp(r->addr[r->via].ip, ips[i])) {
+                r->ndev = pr.ndev; memcpy(r->dev, pr.dev, sizeof pr.dev);
+                for (int k = 0; k < r->ndev; k++) {          // remember names of devices used here
+                    Use *u = use_find(r->id, r->dev[k].busid);
+                    if (!u || !r->dev[k].name[0]) continue;
+                    snprintf(u->name, sizeof u->name, "%s", r->dev[k].name);
+                    snprintf(u->vid, sizeof u->vid, "%s", r->dev[k].vid);
+                    snprintf(u->pid, sizeof u->pid, "%s", r->dev[k].pid);
+                }
+            }
             if (r->via < 0) r->ndev = 0;
         }
         cl_unlock();
@@ -438,7 +448,10 @@ static void client_json(sb_t *j) {
             if (!f2) sb_add(j, ",", 1);
             f2 = 0;
             sb_add(j, "{\"busid\":", 9); sb_jstr(j, u->busid);
-            sb_printf(j, ",\"name\":\"\",\"vid\":\"\",\"pid\":\"\",\"state\":\"%s\",\"countdown\":0,\"auto\":%s,\"peer\":\"\"}",
+            sb_add(j, ",\"name\":", 8); sb_jstr(j, u->name);
+            sb_add(j, ",\"vid\":", 7); sb_jstr(j, u->vid);
+            sb_add(j, ",\"pid\":", 7); sb_jstr(j, u->pid);
+            sb_printf(j, ",\"state\":\"%s\",\"countdown\":0,\"auto\":%s,\"peer\":\"\"}",
                       u->port >= 0 ? "mine" : "waiting", u->autorc ? "true" : "false");
         }
         sb_add(j, "]}", 2);
@@ -481,7 +494,15 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         if (u) {
             if (!strcmp(op, "release")) u->release = 1;
             else if (!strcmp(op, "auto")) { u->autorc = on; if (!on && !u->want) u->used = 0; }
-            else { u->want = 1; u->next_try = 0; u->release = 0; }
+            else {
+                u->want = 1; u->next_try = 0; u->release = 0;
+                Remote *r = rm_find(pc);
+                if (r) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, busid) && r->dev[k].name[0]) {
+                    snprintf(u->name, sizeof u->name, "%s", r->dev[k].name);
+                    snprintf(u->vid, sizeof u->vid, "%s", r->dev[k].vid);
+                    snprintf(u->pid, sizeof u->pid, "%s", r->dev[k].pid);
+                }
+            }
         }
         cl_unlock();
         client_save();

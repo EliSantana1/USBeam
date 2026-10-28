@@ -330,10 +330,15 @@ static DWORD WINAPI disco_main(LPVOID arg) {
     a.sin_family = AF_INET; a.sin_port = htons(DISCO_PORT); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(us, (struct sockaddr *)&a, sizeof a)) logm("Discovery port %d busy: other PCs must be added by address", DISCO_PORT);
     DWORD to = 1000; setsockopt(us, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof to);
+    // Announcements go out on their own non-blocking socket: a network that can't take
+    // the message right now is skipped (next try in 3 s) and never holds anything up.
+    SOCKET snd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    u_long nb = 1; ioctlsocket(snd, FIONBIO, &nb);
+    setsockopt(snd, SOL_SOCKET, SO_BROADCAST, (char *)&one, sizeof one);
     ULONGLONG next = 0;
     for (;;) {
         if (WaitForSingleObject(g_quit_event, 0) == WAIT_OBJECT_0) break;
-        if (GetTickCount64() >= next) { disco_announce(us); next = GetTickCount64() + 3000; }
+        if (GetTickCount64() >= next) { disco_announce(snd); next = GetTickCount64() + 3000; }
         char buf[128]; struct sockaddr_in from; int fl = sizeof from;
         int n = recvfrom(us, buf, sizeof buf - 1, 0, (struct sockaddr *)&from, &fl);
         if (n <= 8) continue;
@@ -343,6 +348,7 @@ static DWORD WINAPI disco_main(LPVOID arg) {
         disco_received(buf, ip);
     }
     closesocket(us);
+    closesocket(snd);
     return 0;
 }
 

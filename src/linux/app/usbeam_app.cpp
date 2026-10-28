@@ -31,6 +31,8 @@
 #include <QWebEngineSettings>
 #include <QWebEngineView>
 #include <unistd.h>
+#include <limits.h>
+#include <cstring>
 
 static const char *TOKEN_FILE = "/run/usbeam/ui-token";
 static const int UI_PORT = 3242;
@@ -172,6 +174,29 @@ int main(int argc, char **argv) {
         }
     });
     tray.show();
+
+    // After an update replaces this program, restart into the new version (same state:
+    // window open or just the tray icon).
+    auto *upd = new QTimer(&app);
+    QObject::connect(upd, &QTimer::timeout, &app, [&] {
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (n <= 0) return;
+        exe[n] = 0;
+        const char *tag = " (deleted)";
+        size_t len = strlen(exe), tl = strlen(tag);
+        if (len <= tl || strcmp(exe + len - tl, tag) != 0) return;
+        exe[len - tl] = 0;
+        static int seen = 0;
+        if (access(exe, X_OK) != 0 || ++seen < 2) return;   // give the update time to finish
+        upd->stop();
+        QStringList args;
+        if (!win.isVisible()) args << "--tray";
+        server.close();                                // let the new copy take over
+        QProcess::startDetached(QString::fromLocal8Bit(exe), args);
+        app.quit();
+    });
+    upd->start(5000);
 
     if (!trayOnly) win.showUp();
     return app.exec();

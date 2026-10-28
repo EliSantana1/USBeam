@@ -237,6 +237,23 @@ static void classify_device(Dev *d, const wchar_t *svc) {
     d->is_net = net; d->is_storage = stor; d->is_radio = g_radio_flag;
 }
 
+// True for devices that came over the network: they sit under usbip-win2's virtual
+// USB controller (used from another PC). Those are never offered again.
+static BOOL via_usbip(const wchar_t *inst) {
+    DEVINST di, p;
+    if (CM_Locate_DevNodeW(&di, (DEVINSTID_W)inst, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return FALSE;
+    for (int depth = 0; depth < 8 && CM_Get_Parent(&p, di, 0) == CR_SUCCESS; depth++, di = p) {
+        wchar_t id[400] = L"", svc[64] = L"";
+        ULONG len = sizeof svc;
+        if (CM_Get_Device_IDW(p, id, 400, 0) == CR_SUCCESS) {
+            for (wchar_t *c = id; *c; c++) *c = towupper(*c);
+            if (wcsstr(id, L"USBIP")) return TRUE;
+        }
+        if (CM_Get_DevNode_Registry_PropertyW(p, CM_DRP_SERVICE, NULL, svc, &len, 0) == CR_SUCCESS && !_wcsnicmp(svc, L"usbip", 5)) return TRUE;
+    }
+    return FALSE;
+}
+
 // Rescan USB devices. Only top-level, removable, non-hub devices are listed.
 static void refresh_devices(void) {
     EnterCriticalSection(&g_devs_cs);
@@ -251,6 +268,7 @@ static void refresh_devices(void) {
         get_prop(set, &dev, SPDRP_HARDWAREID, hw, sizeof hw);
         get_prop(set, &dev, SPDRP_SERVICE, svc, sizeof svc);
         if (!_wcsnicmp(svc, L"usbhub", 6)) continue;                              // skip hubs
+        if (via_usbip(inst)) continue;                                            // borrowed from another PC
         DWORD caps = 0;
         SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_CAPABILITIES, NULL, (BYTE *)&caps, sizeof caps, NULL);
         Dev *d = dev_slot(inst);

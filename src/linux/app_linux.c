@@ -22,6 +22,12 @@ static char g_id[33];
 static char g_boot_id[64];
 static char g_settings[] = "/var/lib/usbeam/settings";
 static pthread_mutex_t g_mx = PTHREAD_MUTEX_INITIALIZER;
+// Host-side state (shared devices, hidden/shared lists) is used by the network thread and the
+// app window thread. Recursive: window actions save settings while holding it.
+// Lock order: g_hmx before g_mx.
+static pthread_mutex_t g_hmx = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static void host_lock(void) { pthread_mutex_lock(&g_hmx); }
+static void host_unlock(void) { pthread_mutex_unlock(&g_hmx); }
 
 // ---------------------------------------------------------------- platform hooks for the shared client
 typedef int plat_sock;
@@ -84,10 +90,11 @@ static void plat_tune(void) { tune_drives(); }
 
 // ---------------------------------------------------------------- settings
 static void save_settings(void) {
+    host_lock();
     mkdir("/var/lib/usbeam", 0755);
     char tmp[64]; snprintf(tmp, sizeof tmp, "%s.new", g_settings);
     FILE *f = fopen(tmp, "w");
-    if (!f) return;
+    if (!f) { host_unlock(); return; }
     fprintf(f, "id %s\n", g_id);
     for (int i = 0; i < MAXHIDE; i++) if (g_hidden[i][0]) fprintf(f, "hide %s\n", g_hidden[i]);
     for (int i = 0; i < MAXHIDE; i++) if (g_shared[i][0]) fprintf(f, "share %s\n", g_shared[i]);
@@ -96,6 +103,7 @@ static void save_settings(void) {
     cl_unlock();
     fclose(f);
     rename(tmp, g_settings);
+    host_unlock();
 }
 static void client_save(void) { save_settings(); }
 static void load_settings(void) {
@@ -178,10 +186,11 @@ static void disco_announce(int us) {
     if (getifaddrs(&ifs)) return;
     for (i = ifs; i; i = i->ifa_next) {
         if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_BROADCAST) || !i->ifa_broadaddr) continue;
-        if (i->ifa_flags & IFF_LOOPBACK) continue;
+        if ((i->ifa_flags & IFF_LOOPBACK) || !(i->ifa_flags & IFF_UP) || !(i->ifa_flags & IFF_RUNNING)) continue;
         struct sockaddr_in b = *(struct sockaddr_in *)i->ifa_broadaddr;
         b.sin_port = htons(DISCO_PORT);
-        sendto(us, msg, strlen(msg), 0, (struct sockaddr *)&b, sizeof b);
+        // Never wait: if a network can't take the message right now, skip it (next try in 3 s).
+        sendto(us, msg, strlen(msg), MSG_DONTWAIT, (struct sockaddr *)&b, sizeof b);
     }
     freeifaddrs(ifs);
 }
@@ -218,6 +227,21 @@ static void firewall_setup(void) {
     }
     freeifaddrs(ifs);
     logm("Firewall (ufw): USBeam allowed from this PC's local networks");
+}
+
+// A fingerprint of this PC's private networks, to notice one appearing later (ZeroTier after boot).
+static unsigned long nets_signature(void) {
+    struct ifaddrs *ifs, *i;
+    unsigned long sig = 0;
+    if (getifaddrs(&ifs)) return 0;
+    for (i = ifs; i; i = i->ifa_next) {
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !i->ifa_netmask || (i->ifa_flags & IFF_LOOPBACK)) continue;
+        uint32_t a = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
+        uint32_t m = ntohl(((struct sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr);
+        sig += (unsigned long)((a & m) * 2654435761u) ^ m;
+    }
+    freeifaddrs(ifs);
+    return sig;
 }
 
 // ---------------------------------------------------------------- app window API
@@ -338,6 +362,79 @@ static void write_token_file(void) {
     rename("/run/usbeam/ui-token.new", "/run/usbeam/ui-token");
 }
 
+static int g_uitest;
+
+// The app window's requests run with the host lock held (they read and change shared devices).
+static int ui_api_locked(const char *method, const char *path, const char *body, sb_t *out) {
+    host_lock();
+    int r = ui_api(method, path, body, out);
+    host_unlock();
+    return r;
+}
+
+// Requests from other PCs (port 3240) and the once-a-second host checks.
+static void *host_main(void *arg) {
+    int ls = (int)(intptr_t)arg, one = 1;
+    time_t last_tick = 0;
+    while (!g_stop) {
+        struct pollfd pf = { ls, POLLIN, 0 };
+        if (poll(&pf, 1, 250) > 0 && (pf.revents & POLLIN)) {
+            struct sockaddr_in ca; socklen_t cl = sizeof ca;
+            int s = accept(ls, (struct sockaddr *)&ca, &cl);
+            if (s >= 0) {
+                char peer[64]; inet_ntop(AF_INET, &ca.sin_addr, peer, sizeof peer);
+                setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+                int idle = 10, intvl = 2, cnt = 5;
+                setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+                setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+                setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+                setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+                struct timeval tv = { 5, 0 };
+                setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+                setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+                uint8_t op[8];
+                if (!recv_all(s, op, 8)) {
+                    uint16_t code = (uint16_t)(op[2] << 8 | op[3]);
+                    host_lock();
+                    if (code == OP_REQ_DEVLIST) handle_devlist(s, peer);
+                    else if (code == OP_REQ_INFO) handle_info(s);
+                    else if (code == OP_REQ_IMPORT) {
+                        handle_import(s, peer);
+                        struct timeval z = {0, 0};      // the kernel uses this connection now: no time limits
+                        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &z, sizeof z);
+                        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &z, sizeof z);
+                    }
+                    host_unlock();
+                }
+                close(s);   // after an export the kernel holds its own reference
+            }
+        }
+        time_t now = time(NULL);
+        if (now != last_tick) { last_tick = now; host_lock(); host_tick(); host_unlock(); }
+    }
+    return NULL;
+}
+
+// Discovery: announce this PC every 3 s, hear other PCs, and keep the firewall rules
+// up to date when a network appears later (for example ZeroTier after boot).
+static void *disco_main(void *arg) {
+    int us = (int)(intptr_t)arg;
+    time_t next_announce = 0, next_fw = 0;
+    unsigned long sig = 0;
+    while (!g_stop) {
+        struct pollfd pf = { us, POLLIN, 0 };
+        if (poll(&pf, 1, 500) > 0 && (pf.revents & POLLIN)) disco_receive(us);
+        time_t now = time(NULL);
+        if (now >= next_announce) { disco_announce(us); next_announce = now + 3; }
+        if (now >= next_fw) {
+            next_fw = now + 10;
+            unsigned long s2 = nets_signature();
+            if (s2 != sig) { sig = s2; if (!g_uitest) firewall_setup(); }
+        }
+    }
+    return NULL;
+}
+
 static int cmd_app(int service) {
     if (geteuid() != 0) { printf("USBeam's service needs admin rights (it is normally started by systemd).\n"); return 1; }
     struct stat st;
@@ -350,7 +447,6 @@ static int cmd_app(int service) {
     if (bf) { if (!fgets(g_boot_id, sizeof g_boot_id, bf)) g_boot_id[0] = 0; fclose(bf); g_boot_id[strcspn(g_boot_id, "\n")] = 0; }
     load_settings();
     if (!g_id[0]) { make_random_id(g_id); save_settings(); }
-    if (!uitest) firewall_setup();
 
     // Safety net: return anything left bound to usbip-host.
     DIR *dd = opendir(USBDEV); struct dirent *e;
@@ -376,55 +472,34 @@ static int cmd_app(int service) {
     if (uis < 0) { printf("Cannot use local port %d for the app window. Is USBeam already running?\n", UI_PORT); return 1; }
 
     write_token_file();
-    pthread_t ct;
+    g_uitest = uitest;
+    pthread_t ct, ht, dt;
     pthread_create(&ct, NULL, client_main, NULL);
+    pthread_create(&ht, NULL, host_main, (void *)(intptr_t)ls);
+    pthread_create(&dt, NULL, disco_main, (void *)(intptr_t)us);
     logm("USBeam for Linux started on %s", g_name);
     if (!service) open_window();
 
-    time_t next_announce = 0;
+    // This thread serves the app window only, so nothing else can make the window hang.
     while (!g_stop) {
-        struct pollfd pf[3] = { { ls, POLLIN, 0 }, { uis, POLLIN, 0 }, { us, POLLIN, 0 } };
-        int r = poll(pf, 3, 250);
-        if (r > 0 && (pf[0].revents & POLLIN)) {
-            struct sockaddr_in ca; socklen_t cl = sizeof ca;
-            int s = accept(ls, (struct sockaddr *)&ca, &cl);
-            if (s >= 0) {
-                char peer[64]; inet_ntop(AF_INET, &ca.sin_addr, peer, sizeof peer);
-                setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-                int idle = 10, intvl = 2, cnt = 5;
-                setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
-                struct timeval tv = { 5, 0 };
-                setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-                uint8_t op[8];
-                if (!recv_all(s, op, 8)) {
-                    uint16_t code = (uint16_t)(op[2] << 8 | op[3]);
-                    if (code == OP_REQ_DEVLIST) handle_devlist(s, peer);
-                    else if (code == OP_REQ_INFO) handle_info(s);
-                    else if (code == OP_REQ_IMPORT) { struct timeval z = {0, 0}; handle_import(s, peer); setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &z, sizeof z); }
-                }
-                close(s);
-            }
-        }
-        if (r > 0 && (pf[1].revents & POLLIN)) {
+        struct pollfd pf = { uis, POLLIN, 0 };
+        if (poll(&pf, 1, 250) > 0 && (pf.revents & POLLIN)) {
             int c = accept(uis, NULL, NULL);
             if (c >= 0) {
                 struct timeval tv = { 2, 0 };
                 setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-                ui_serve(c, ui_api);
+                setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+                ui_serve(c, ui_api_locked);
                 close(c);
             }
         }
-        if (r > 0 && (pf[2].revents & POLLIN)) disco_receive(us);
-        time_t now = time(NULL);
-        if (now >= next_announce) { disco_announce(us); next_announce = now + 3; }
-        static time_t last_tick;
-        if (now != last_tick) { last_tick = now; host_tick(); }
     }
     logm("Stopping: returning all devices and releasing remote ones...");
+    pthread_join(ht, NULL);
+    pthread_join(dt, NULL);
+    host_lock();
     for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) return_to_host(g_h[i].busid);
+    host_unlock();
     pthread_join(ct, NULL);
     client_release_all();
     unlink("/run/usbeam/ui-token");

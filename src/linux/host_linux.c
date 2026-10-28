@@ -79,10 +79,19 @@ static int bound_to_stub(const char *busid) {
     return strstr(real, "/usbip-host") != NULL;
 }
 
-// Shareable = a real device (not a root hub or interface), not a hub, not a network adapter.
+// True for devices that came over the network (used from another PC through vhci-hcd).
+static int on_vhci(const char *busid) {
+    char p[PATH_MAX], real[PATH_MAX];
+    snprintf(p, sizeof p, USBDEV "/%s", busid);
+    return realpath(p, real) && strstr(real, "vhci_hcd") != NULL;
+}
+
+// Shareable = a real device (not a root hub or interface), not a hub, not a network adapter,
+// and not a device that is itself borrowed from another PC.
 static int shareable(const char *busid) {
     if (!strncmp(busid, "usb", 3) || strchr(busid, ':') || !strchr(busid, '-')) return 0;
     if (!dev_present(busid)) return 0;
+    if (on_vhci(busid)) return 0;
     if (attr_hex(busid, "bDeviceClass") == 0x09) return 0;
     if (has_net_child(busid)) return 0;
     return 1;
