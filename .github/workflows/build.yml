@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds USBeam for Windows (ARM64 + x64) and Linux (x86_64) on every push.
+# Pushing a tag like v0.1.0 also publishes a GitHub Release with the files.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LLVM_MINGW: llvm-mingw-20250430-ucrt-ubuntu-22.04-x86_64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Windows cross-compiler (llvm-mingw)
+        run: |
+          curl -sSL -o llvm-mingw.tar.xz \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20250430/${LLVM_MINGW}.tar.xz
+          tar xf llvm-mingw.tar.xz
+          echo "$PWD/${LLVM_MINGW}/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: make all
+
+      - name: Upload build files
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbeam-builds
+          path: |
+            build/usbeam
+            build/usbeam-host-arm64.exe
+            build/usbeam-host-x64.exe
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/usbeam
+            build/usbeam-host-arm64.exe
+            build/usbeam-host-x64.exe
