@@ -287,8 +287,20 @@ static void client_tick(void) {
         cl_lock();
         Remote *r = rm_find(u.pc);
         if (r && r->via >= 0) snprintf(ip, sizeof ip, "%s", r->addr[r->via].ip);
-        int listed = 0;
-        if (r) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, u.busid) && !strcmp(r->dev[k].state, "available")) listed = 1;
+        int listed = 0, kept = 0;
+        if (r && r->via >= 0) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, u.busid)) {
+            if (!strcmp(r->dev[k].state, "available")) listed = 1;
+            else if (!strcmp(r->dev[k].state, "kept")) kept = 1;
+        }
+        // The host chose to keep this device (Cancel or Take back there): the host's choice
+        // wins, so stop waiting and turn Auto-reconnect off for it.
+        if (kept && g_use[i].used && g_use[i].port < 0 && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
+            g_use[i].used = 0;
+            cl_unlock();
+            logm("[%s] the host kept this device: stopped waiting, Auto-reconnect off", u.busid);
+            changed = 1;
+            continue;
+        }
         cl_unlock();
         if (!ip[0] || !listed) { cl_lock(); g_use[i].next_try = now + 2000; cl_unlock(); continue; }
         int port = plat_attach(ip, u.busid);
