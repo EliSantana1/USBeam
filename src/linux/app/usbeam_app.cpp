@@ -16,6 +16,10 @@
 #include <QLocalSocket>
 #include <QMainWindow>
 #include <QMenu>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QProcess>
 #include <QPalette>
 #include <QScreen>
 #include <QStyleHints>
@@ -37,6 +41,12 @@ static QString readToken(bool *denied) {
     if (!f.exists()) return {};
     if (!f.open(QIODevice::ReadOnly)) { *denied = true; return {}; }
     return QString::fromLatin1(f.readAll()).trimmed();
+}
+
+// Start the USBeam service if it isn't running (after Quit). A polkit rule installed with
+// USBeam lets administrators (wheel) start and stop this one service without a password.
+static void ensureService() {
+    QProcess::startDetached("systemctl", { "start", "--no-ask-password", "usbeam.service" });
 }
 
 static bool darkTheme() {
@@ -128,6 +138,7 @@ int main(int argc, char **argv) {
     QLocalServer server;
     server.listen(sockName);
 
+    ensureService();
     Window win;
     QObject::connect(&server, &QLocalServer::newConnection, [&] {
         QLocalSocket *c = server.nextPendingConnection();
@@ -139,7 +150,21 @@ int main(int argc, char **argv) {
     QMenu menu;
     menu.addAction("Open USBeam", [&] { win.showUp(); });
     menu.addSeparator();
-    menu.addAction("Close this app (sharing keeps running)", [&] { app.quit(); });
+    QNetworkAccessManager net;
+    menu.addAction("Quit USBeam", [&] {
+        // Quit = stop everything: the service ends all connections, returns shared devices
+        // to this PC and releases devices used from other PCs. Then close.
+        win.hide();
+        bool denied;
+        QString tok = readToken(&denied);
+        if (tok.isEmpty()) { app.quit(); return; }
+        QNetworkRequest req(QUrl(QString("http://127.0.0.1:%1/api/action").arg(UI_PORT)));
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        req.setRawHeader("X-USBeam-Token", tok.toLatin1());
+        QNetworkReply *r = net.post(req, QByteArray("{\"op\":\"quit\"}"));
+        QObject::connect(r, &QNetworkReply::finished, &app, [&app, r] { r->deleteLater(); app.quit(); });
+        QTimer::singleShot(3000, &app, [&app] { app.quit(); });
+    });
     tray.setContextMenu(&menu);
     QObject::connect(&tray, &QSystemTrayIcon::activated, [&](QSystemTrayIcon::ActivationReason r) {
         if (r == QSystemTrayIcon::Trigger || r == QSystemTrayIcon::DoubleClick) {

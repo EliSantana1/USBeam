@@ -405,6 +405,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     int code = 200;
 
     if (!strcmp(op, "forget_auto")) { client_forget_auto(); }
+    else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); SetEvent(g_quit_event); }
     else if (!strcmp(op, "local_cancel")) { if (d && d->hold_until) { d->hold_until = 0; d->blocked = 1; say("[%s] reconnect cancelled: %ls stays on this PC", d->busid, d->name); } }
     else if (!strcmp(op, "local_allow")) { if (d) { d->blocked = 0; d->hold_until = 0; } }
     else if (!strcmp(op, "local_hide")) { if (d) { d->hidden = 1; d->share_forced = 0; save_config(); } }
@@ -533,6 +534,9 @@ static int engine_run(void) {
     for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use) end_session(&g_devs[i]);
     if (have_usbip()) client_release_all();
     Sleep(3000);       // let sessions finish returning devices
+    {   // the app shows "starting…" until the service runs again
+        wchar_t p[MAX_PATH]; _snwprintf(p, MAX_PATH, L"%ls\\ui-token", g_data_dir); DeleteFileW(p);
+    }
     logm("======== USBeam service stopped");
     if (g_log) fflush(g_log);
     return 0;

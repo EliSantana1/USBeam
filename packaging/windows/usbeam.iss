@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 
 [Setup]
 AppId={{6D2C1B54-7E7A-4F1B-9B5D-3E1F0A9C5B21}
@@ -49,6 +49,8 @@ Filename: "{sys}\sc.exe"; Parameters: "create USBeam binPath= ""{app}\usbeam-ser
 Filename: "{sys}\sc.exe"; Parameters: "config USBeam binPath= ""{app}\usbeam-service.exe"" start= auto"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "description USBeam ""Shares and connects USB devices between your computers."""; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "failure USBeam reset= 86400 actions= restart/3000/restart/3000/restart/10000"; Flags: runhidden waituntilterminated
+; Signed-in users may start/stop this one service (the app's Quit and restart), nothing else.
+Filename: "{sys}\sc.exe"; Parameters: "sdset USBeam D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;IU)"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "start USBeam"; Flags: runhidden waituntilterminated
 Filename: "{app}\USBeam.exe"; Description: "Open USBeam now"; Flags: postinstall nowait skipifsilent runasoriginaluser
 

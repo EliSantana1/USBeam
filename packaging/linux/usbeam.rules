@@ -1,0 +1,10 @@
+// USBeam: let administrators (wheel) start and stop the USBeam service from the
+// USBeam app's tray menu without a password prompt. Applies to usbeam.service only.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "usbeam.service" &&
+        (action.lookup("verb") == "start" || action.lookup("verb") == "stop" || action.lookup("verb") == "restart") &&
+        subject.isInGroup("wheel") && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

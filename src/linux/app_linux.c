@@ -259,6 +259,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     int code = 200;
 
     if (!strcmp(op, "forget_auto")) { client_forget_auto(); }
+    else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); g_stop = 1; }
     else if (!strcmp(op, "local_cancel")) { if (h && h->hold_until) { h->hold_until = 0; h->blocked = 1; logm("[%s] reconnect cancelled", id); } }
     else if (!strcmp(op, "local_allow")) { if (h) { h->blocked = 0; h->hold_until = 0; } }
     else if (!strcmp(op, "local_hide")) { set_hidden(id, 1); set_shared(id, 0); save_settings(); }
@@ -426,5 +427,6 @@ static int cmd_app(int service) {
     for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) return_to_host(g_h[i].busid);
     pthread_join(ct, NULL);
     client_release_all();
+    unlink("/run/usbeam/ui-token");
     return 0;
 }

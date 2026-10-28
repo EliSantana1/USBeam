@@ -95,6 +95,20 @@ static void post_action(const char *json) {
     closesocket(s);
 }
 
+// Start the USBeam service if it isn't running (after Quit, or if it was stopped).
+// The installer lets signed-in users start and stop this one service.
+static void ensure_service() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return;
+    SC_HANDLE svc = OpenServiceW(scm, L"USBeam", SERVICE_QUERY_STATUS | SERVICE_START);
+    if (svc) {
+        SERVICE_STATUS st;
+        if (QueryServiceStatus(svc, &st) && st.dwCurrentState == SERVICE_STOPPED) StartServiceW(svc, 0, nullptr);
+        CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+}
+
 static bool system_dark() {
     DWORD v = 1, sz = sizeof v;
     RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &v, &sz);
@@ -229,14 +243,20 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             HMENU m = CreatePopupMenu();
             AppendMenuW(m, MF_STRING, 1, L"Open USBeam");
             AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(m, MF_STRING, 2, L"Close this app (sharing keeps running)");
+            AppendMenuW(m, MF_STRING, 2, L"Quit USBeam");
             SetMenuDefaultItem(m, 1, FALSE);
             POINT pt; GetCursorPos(&pt);
             SetForegroundWindow(h);
             int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
             DestroyMenu(m);
             if (cmd == 1) show_window();
-            else if (cmd == 2) DestroyWindow(h);
+            else if (cmd == 2) {
+                // Quit = stop everything: the service ends all connections, returns shared
+                // devices to this PC and releases devices used from other PCs. Then close.
+                ShowWindow(h, SW_HIDE);
+                post_action("{\"op\":\"quit\"}");
+                DestroyWindow(h);
+            }
         }
         return 0;
     case WM_SHOW_APP:
@@ -292,6 +312,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int show) {
     apply_title_bar_theme();
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     tray_add();
+    ensure_service();
     start_webview();
     SetTimer(g_hwnd, TIMER_CHECK, 3000, nullptr);
     if (!tray_only) show_window();
