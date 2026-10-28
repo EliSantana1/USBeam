@@ -183,9 +183,69 @@ static int list_shareable(char ids[][32], int max) {
     return n;
 }
 
+// ---------------------------------------------------------------- hidden devices & drives in use
+#define MAXHIDE 64
+static char g_hidden[MAXHIDE][32];
+static int is_hidden(const char *busid) {
+    for (int i = 0; i < MAXHIDE; i++) if (g_hidden[i][0] && !strcmp(g_hidden[i], busid)) return 1;
+    return 0;
+}
+static void set_hidden(const char *busid, int on) {
+    for (int i = 0; i < MAXHIDE; i++) if (g_hidden[i][0] && !strcmp(g_hidden[i], busid)) { if (!on) g_hidden[i][0] = 0; return; }
+    if (on) for (int i = 0; i < MAXHIDE; i++) if (!g_hidden[i][0]) { snprintf(g_hidden[i], 32, "%s", busid); return; }
+}
+
+static char g_shared[MAXHIDE][32];      // opt-in devices the user chose to share
+static int is_shared(const char *busid) {
+    for (int i = 0; i < MAXHIDE; i++) if (g_shared[i][0] && !strcmp(g_shared[i], busid)) return 1;
+    return 0;
+}
+static void set_shared(const char *busid, int on) {
+    for (int i = 0; i < MAXHIDE; i++) if (g_shared[i][0] && !strcmp(g_shared[i], busid)) { if (!on) g_shared[i][0] = 0; return; }
+    if (on) for (int i = 0; i < MAXHIDE; i++) if (!g_shared[i][0]) { snprintf(g_shared[i], 32, "%s", busid); return; }
+}
+
+// Bluetooth / Wi-Fi radios (class e0) are usually built into the PC: only shared if chosen.
+static int is_radio(const char *busid) {
+    if (attr_hex(busid, "bDeviceClass") == 0xe0) return 1;
+    unsigned cfg = attr_dec(busid, "bConfigurationValue"), n = attr_dec(busid, "bNumInterfaces");
+    for (unsigned i = 0; i < n && i < 32; i++) {
+        char p[PATH_MAX], v[16] = ""; FILE *f;
+        snprintf(p, sizeof p, USBDEV "/%s:%u.%u/bInterfaceClass", busid, cfg, i);
+        if ((f = fopen(p, "r"))) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); }
+        if (strtoul(v, NULL, 16) == 0xe0) return 1;
+    }
+    return 0;
+}
+
+// True if a disk behind this USB device has a mounted partition (it is in use by this PC).
+static int drive_mounted(const char *busid) {
+    DIR *d = opendir("/sys/block");
+    if (!d) return 0;
+    struct dirent *e;
+    char needle[48]; snprintf(needle, sizeof needle, "/%s/", busid);
+    int mounted = 0;
+    while (!mounted && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char link[PATH_MAX], real[PATH_MAX];
+        snprintf(link, sizeof link, "/sys/block/%s", e->d_name);
+        if (!realpath(link, real) || !strstr(real, needle)) continue;
+        FILE *m = fopen("/proc/mounts", "r");
+        if (!m) continue;
+        char line[1024], dev[64];
+        snprintf(dev, sizeof dev, "/dev/%s", e->d_name);
+        while (fgets(line, sizeof line, m)) if (!strncmp(line, dev, strlen(dev))) { mounted = 1; break; }
+        fclose(m);
+    }
+    closedir(d);
+    return mounted;
+}
+
 static int offerable(const char *busid) {
     HostDev *h = hdev(busid, 0);
     if (!shareable(busid)) return 0;
+    if (is_hidden(busid) || drive_mounted(busid)) return 0;
+    if (is_radio(busid) && !is_shared(busid)) return 0;
     if (h && (h->exported || h->blocked)) return 0;
     return 1;
 }

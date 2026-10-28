@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=USBeam
+GenericName=USB over network
+Comment=Share USB devices between your computers
+Exec=usbeam-app
+Icon=usbeam
+Terminal=false
+Categories=System;Utility;Network;
+Keywords=USB;IP;share;remote;device;
+StartupWMClass=usbeam

@@ -1,0 +1,12 @@
+post_install() {
+    systemctl daemon-reload
+    systemctl enable --now usbeam.service
+    echo "USBeam is installed. Open it from your application menu; it also starts by itself at login."
+}
+post_upgrade() {
+    systemctl daemon-reload
+    systemctl restart usbeam.service
+}
+pre_remove() {
+    systemctl disable --now usbeam.service
+}

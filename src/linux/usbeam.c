@@ -255,14 +255,18 @@ static int cmd_use(const char *ip, int n, char **busids) {
 }
 
 #include "host_linux.c"
+#include "app_linux.c"
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--service")) return cmd_app(1);
+    if (argc == 1 || (argc == 2 && !strcmp(argv[1], "app"))) return cmd_app(0);
     if (argc >= 3 && !strcmp(argv[1], "list")) return cmd_list(argv[2]);
     if (argc >= 4 && !strcmp(argv[1], "use")) return cmd_use(argv[2], argc - 3, argv + 3);
     if (argc >= 2 && !strcmp(argv[1], "host")) return cmd_host();
-    printf("USBeam for Linux - test version 4\n\n"
+    printf("USBeam for Linux - test version 5\n\n"
            "  usbeam list <host-ip>                  show devices the host is sharing\n"
            "  sudo usbeam use <host-ip> <busid> ...  attach and keep attached (auto-reconnect)\n"
-           "  sudo usbeam host                       share this PC's USB devices\n");
+           "  sudo usbeam host                       share this PC's USB devices\n"
+           "  sudo usbeam                            start the USBeam app (opens its window)\n");
     return 1;
 }

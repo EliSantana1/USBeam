@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the USBeam package for Arch Linux and Arch-based systems (EndeavourOS, Manjaro...).
+# Run from this folder: makepkg
+pkgname=usbeam
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Free, open-source USB over IP: share USB devices between your computers"
+arch=('x86_64' 'aarch64')
+url="https://github.com/EliSantana1/USBeam"
+license=('GPL-3.0-or-later')
+depends=('qt6-webengine' 'qt6-base' 'glibc')
+makedepends=('gcc' 'python')
+install=usbeam.install
+
+build() {
+    cd "$startdir/../.."
+    make linux-pkg linux-app
+}
+
+package() {
+    cd "$startdir/../.."
+    install -Dm755 build/usbeam-dyn "$pkgdir/usr/bin/usbeam"
+    install -Dm755 build/usbeam-app "$pkgdir/usr/bin/usbeam-app"
+    install -Dm644 packaging/linux/usbeam.service "$pkgdir/usr/lib/systemd/system/usbeam.service"
+    install -Dm644 packaging/linux/usbeam-modules.conf "$pkgdir/usr/lib/modules-load.d/usbeam.conf"
+    install -Dm644 packaging/linux/usbeam.desktop "$pkgdir/usr/share/applications/usbeam.desktop"
+    install -Dm644 packaging/linux/usbeam-autostart.desktop "$pkgdir/etc/xdg/autostart/usbeam.desktop"
+    install -Dm644 assets/usbeam.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/usbeam.svg"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/usbeam/LICENSE"
+}

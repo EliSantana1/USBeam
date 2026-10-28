@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=USBeam
+Comment=USBeam tray icon
+Exec=usbeam-app --tray
+Icon=usbeam
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=2

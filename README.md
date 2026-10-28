@@ -6,10 +6,9 @@ Plug a USB device into one computer and use it on another over your network,
 as if it were plugged in there. Mice, keyboards, game controllers, drives and
 more. No device limits, no subscriptions, no closed source.
 
-> **Status: early development.** The core engine works and has been tested
-> between Windows and Linux in both directions. The graphical app,
-> installers and automatic discovery are not built yet. The current test
-> programs are command-line only and meant for development.
+> **Status: early development (0.2).** Sharing and using devices works between
+> Windows and Linux in both directions, with automatic
+> discovery, a graphical app, a background service and installers being tested.
 
 ## Goals
 
@@ -41,26 +40,31 @@ more. No device limits, no subscriptions, no closed source.
 
 Not supported yet: isochronous devices (webcams, USB audio).
 
+## How it's put together
+
+- **The USBeam service** does the USB work. It starts with the computer
+  (a Windows service / a systemd service) and needs nobody at the keyboard.
+- **The USBeam app** is a tray icon plus a native window (WebView2 on Windows,
+  Qt WebEngine on Linux, matching KDE Plasma). Closing the window keeps USBeam
+  running in the tray.
+- **Networks:** each PC appears once, with every address it is reachable at
+  (home network, ZeroTier, Tailscale); "Connect over" picks which one to use.
+- **Auto-reconnect** survives sleep and hibernate, but is cleared when a PC is
+  shut down or restarted.
+
 ## Roadmap
 
-1. Background service + GUI app (host and client tabs in one window)
-2. Automatic discovery of computers on the local network
-3. Pairing / password so only your computers can take devices
-4. Installers for Windows (x64 + ARM64) and Linux, firewall rules included
-5. Hide devices that must never be shared (mounted drives, built-in parts, the network adapter in use)
-6. Isochronous transfers (webcams, audio)
-7. macOS and Android as hosts where the OS allows it
+1. Pairing / password so only your computers can take devices
+2. Bundle the usbip-win2 driver in the Windows installer
+3. Packages for more Linux distributions (Debian/Ubuntu, Fedora)
+4. Isochronous transfers (webcams, audio)
+5. macOS and Android as hosts where the OS allows it
 
 ## Building
 
 Every push to `main` is built automatically by GitHub Actions (see the
-**Actions** tab for downloadable builds). To build yourself on Linux:
-
-```
-make linux                 # needs gcc
-make windows-arm64         # needs llvm-mingw in PATH
-make windows-x64
-```
+**Actions** tab): a Windows installer (x64 + ARM64) and an Arch Linux package.
+See the `Makefile` and `packaging/` for building by hand.
 
 ## License
 

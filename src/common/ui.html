@@ -1,0 +1,245 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USBeam</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --text: #161a21; --muted: #5b6472; --line: #e1e4e9; --line2: #eef0f3;
+  --chip: #eef1f5; --ok: #15803d; --warn: #a16207; --bad: #b91c1c; --accent: #2563eb; --accent-text: #ffffff;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { color-scheme: dark;
+    --bg: #0f1217; --panel: #171b22; --text: #e6e9ef; --muted: #9aa4b2; --line: #2a3039; --line2: #222831;
+    --chip: #222831; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --accent: #3b82f6; --accent-text: #ffffff;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1217; --panel: #171b22; --text: #e6e9ef; --muted: #9aa4b2; --line: #2a3039; --line2: #222831;
+  --chip: #222831; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --accent: #3b82f6; --accent-text: #ffffff;
+  --shadow: none; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system, Roboto, "Noto Sans", sans-serif; -webkit-font-smoothing: antialiased; }
+button, select, input { font: inherit; color: inherit; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+header { background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+header .wrap { display: flex; align-items: center; gap: 14px; padding-top: 12px; padding-bottom: 12px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.pcchip { font-size: 12px; color: var(--muted); background: var(--chip); padding: 3px 9px; border-radius: 99px; }
+.spacer { flex: 1 1 auto; }
+.netpick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+select { padding: 7px 30px 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); min-height: 36px; font-size: 13px; cursor: pointer; }
+.iconbtn { min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--muted); }
+.iconbtn:hover { color: var(--text); }
+
+main .wrap { padding-top: 22px; padding-bottom: 48px; }
+nav.tabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--chip); border-radius: 10px; margin-bottom: 18px; }
+nav.tabs button { min-height: 36px; padding: 0 16px; border: 0; border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer; background: transparent; color: var(--muted); }
+nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.hint { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 16px; overflow: hidden; box-shadow: var(--shadow); }
+.boxhead { display: flex; align-items: center; gap: 12px; padding: 14px 18px; flex-wrap: wrap; }
+.boxhead .name { font-weight: 600; font-size: 15px; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.status::before { content: ""; width: 7px; height: 7px; border-radius: 99px; background: currentColor; }
+.status.on { color: var(--ok); } .status.off { color: var(--muted); }
+.via { font-size: 12px; color: var(--muted); }
+.row { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-top: 1px solid var(--line2); flex-wrap: wrap; }
+.dicon { width: 36px; height: 36px; border-radius: 9px; background: var(--chip); display: flex; align-items: center; justify-content: center; flex: 0 0 auto; color: var(--muted); }
+.dinfo { flex: 1 1 240px; min-width: 0; }
+.dname { font-weight: 500; overflow-wrap: anywhere; }
+.dsub { font-size: 12px; color: var(--muted); }
+.pill { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; background: var(--chip); white-space: nowrap; color: var(--muted); }
+.pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.accent { color: var(--accent); } .pill.bad { color: var(--bad); }
+.auto { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); cursor: pointer; min-height: 36px; user-select: none; }
+.auto input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.btn { min-width: 92px; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-weight: 600; font-size: 13px; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .55; cursor: default; }
+.noact { min-width: 92px; text-align: center; font-size: 12px; color: var(--muted); }
+.empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 12px; padding: 28px; text-align: center; color: var(--muted); }
+.note { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; color: var(--muted); }
+.addpc { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.addpc input { flex: 0 1 280px; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+#banner { display: none; margin-bottom: 16px; padding: 12px 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); color: var(--bad); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 640px) { .wrap { padding: 0 14px; } .netpick span { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect x="1" y="1" width="26" height="26" rx="7" fill="var(--accent)"></rect><path d="M9 9v6a5 5 0 0 0 10 0V9" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"></path><path d="M14 5v9" stroke="#fff" stroke-width="2.2" stroke-linecap="round"></path></svg>
+      USBeam
+    </div>
+    <span class="pcchip" id="pcname">This PC</span>
+    <div class="spacer"></div>
+    <label class="netpick"><span>Connect over</span>
+      <select id="net" onchange="act({op:'set_net', value:this.value})"></select>
+    </label>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+    <div id="banner" role="alert"></div>
+    <nav class="tabs" aria-label="Sections">
+      <button id="tab-net" class="on" onclick="showTab('net')">Network Devices</button>
+      <button id="tab-local" onclick="showTab('local')">This PC's Devices</button>
+    </nav>
+    <section id="view-net">
+      <p class="hint" id="nethint"></p>
+      <div id="pcs"></div>
+      <div class="addpc">
+        <label for="addr" class="sr">PC address</label>
+        <input id="addr" placeholder="Add a PC by address" onkeydown="if(event.key==='Enter')addHost()">
+        <button class="btn" onclick="addHost()">Add PC</button>
+      </div>
+    </section>
+    <section id="view-local" hidden>
+      <p class="hint">Devices plugged into this PC. They keep working here until another PC starts using them, and come back here when it lets go.</p>
+      <p class="hint">Closing this window keeps USBeam running. Open it again from its tray icon.</p>
+      <div class="box" id="local"></div>
+    </section>
+  </div>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+const token = params.get('t') || '';
+if (params.get('theme') === 'dark' || params.get('theme') === 'light') document.documentElement.dataset.theme = params.get('theme');
+let tab = 'net', busy = false, lastPcs = '', lastLocal = '', lastNets = '';
+const ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v14M8 7l4-4 4 4M7 12h2v3M17 10h-2v3"></path><circle cx="12" cy="19" r="2"></circle></svg>';
+const PCICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" style="color:var(--muted)"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg>';
+
+function showTab(t) {
+  tab = t;
+  for (const x of ['net', 'local']) {
+    document.getElementById('tab-' + x).classList.toggle('on', x === t);
+    document.getElementById('view-' + x).hidden = x !== t;
+  }
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function attr(o) { return esc(JSON.stringify(o)); }
+function banner(msg) { const b = document.getElementById('banner'); b.textContent = msg || ''; b.style.display = msg ? 'block' : 'none'; }
+
+async function act(body) {
+  if (busy) return;
+  busy = true;
+  try {
+    const r = await fetch('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-USBeam-Token': token }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    banner(!r.ok || j.error ? (j.error || 'Something went wrong (' + r.status + ').') : '');
+  } catch (e) { banner('USBeam is not responding.'); }
+  busy = false;
+  lastPcs = lastLocal = '';
+  refresh();
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (b && b.tagName !== 'INPUT') act(JSON.parse(b.dataset.act));
+});
+document.addEventListener('change', e => {
+  const b = e.target.closest('input[data-act]');
+  if (b) act(Object.assign(JSON.parse(b.dataset.act), { on: b.checked }));
+});
+function addHost() {
+  const el = document.getElementById('addr'), a = el.value.trim();
+  if (a) { act({ op: 'add_host', host: a }); el.value = ''; }
+}
+
+function remoteRow(pc, d) {
+  const key = { pc: pc.id, busid: d.busid };
+  let label = 'Available', kind = 'ok';
+  switch (d.state) {
+    case 'mine': label = 'In use here'; kind = 'accent'; break;
+    case 'connecting': label = 'Connecting…'; kind = 'warn'; break;
+    case 'waiting': label = 'Waiting to reconnect'; kind = 'warn'; break;
+    case 'countdown': label = 'Back in ' + d.countdown + ' s'; kind = 'warn'; break;
+    case 'busy': label = 'In use by ' + (d.peer || 'another PC'); kind = 'warn'; break;
+    case 'kept': label = 'Kept on its PC'; kind = ''; break;
+  }
+  let btn = '<span class="noact">—</span>';
+  if (['mine', 'connecting', 'waiting', 'countdown'].includes(d.state)) btn = `<button class="btn" data-act="${attr(Object.assign({ op: 'release' }, key))}">Release</button>`;
+  else if (d.state === 'available') btn = `<button class="btn primary" data-act="${attr(Object.assign({ op: 'use' }, key))}">Use</button>`;
+  const sub = [d.vid && d.pid ? d.vid + ':' + d.pid : '', d.busid].filter(Boolean).join(' · ');
+  return `<div class="row"><div class="dicon">${ICON}</div>
+    <div class="dinfo"><div class="dname">${esc(d.name || 'USB device')}</div><div class="dsub">${esc(sub)}</div></div>
+    <span class="pill ${kind}">${esc(label)}</span>
+    <label class="auto"><input type="checkbox" ${d.auto ? 'checked' : ''} data-act="${attr(Object.assign({ op: 'auto' }, key))}">Auto-reconnect</label>
+    ${btn}</div>`;
+}
+function renderPcs(s) {
+  const pcs = s.pcs || [];
+  let html = s.client_note ? `<div class="note">${esc(s.client_note)}</div>` : '';
+  if (!pcs.length) html += `<div class="empty">No other PCs found${s.net === 'auto' ? '' : ' on this network'} yet. They appear here automatically when USBeam runs on them, or add one by address below.</div>`;
+  for (const pc of pcs) {
+    html += `<section class="box"><div class="boxhead">${PCICON}<span class="name">${esc(pc.name)}</span>
+      <span class="status ${pc.online ? 'on' : 'off'}">${pc.online ? 'Online' : 'Offline'}</span><div class="spacer"></div>
+      <span class="via">${esc(pc.via)}</span></div>`;
+    if (!pc.devices.length) html += `<div class="row"><span class="dsub">${pc.online ? 'No shared devices.' : 'Not reachable right now.'}</span></div>`;
+    for (const d of pc.devices) html += remoteRow(pc, d);
+    html += '</section>';
+  }
+  document.getElementById('pcs').innerHTML = html;
+}
+function renderLocal(list) {
+  const el = document.getElementById('local');
+  if (!list.length) { el.innerHTML = '<div class="row"><span class="dsub">No USB devices found.</span></div>'; return; }
+  el.innerHTML = list.map(d => {
+    const id = { id: d.id };
+    const M = {
+      in_use: ['In use by ' + d.peer, 'warn', 'Take back', 'local_disconnect', ''],
+      available: ['Available to other PCs', 'ok', "Don't share", 'local_hide', ''],
+      countdown: ['Returning in ' + d.countdown + ' s', 'warn', 'Cancel', 'local_cancel', 'primary'],
+      kept: ['Kept on this PC', '', 'Share again', 'local_allow', ''],
+      hidden: ['Not shared', '', 'Share', 'local_share', ''],
+      switching: ['Switching…', 'warn', null, null, '']
+    }[d.state] || [d.state, '', null, null, ''];
+    let label = M[0];
+    const btn = (M[2] && !d.fixed) ? `<button class="btn ${M[4]}" style="min-width:110px" data-act="${attr(Object.assign({ op: M[3] }, id))}">${esc(M[2])}</button>` : '<span class="noact" style="min-width:110px">—</span>';
+    const sub = [d.vid + ':' + d.pid, d.id, d.note].filter(Boolean).join(' · ');
+    return `<div class="row"><div class="dicon">${ICON}</div>
+      <div class="dinfo"><div class="dname">${esc(d.name)}</div><div class="dsub">${esc(sub)}</div></div>
+      <span class="pill ${M[1]}">${esc(label)}</span>${btn}</div>`;
+  }).join('');
+}
+
+async function refresh() {
+  if (busy) return;
+  try {
+    const r = await fetch('/api/state', { headers: { 'X-USBeam-Token': token } });
+    if (r.status === 403) { banner('This window is out of date. Open USBeam again from its icon.'); return; }
+    const s = await r.json();
+    document.getElementById('pcname').textContent = 'This PC: ' + (s.name || '');
+    const nets = JSON.stringify([s.nets, s.net]);
+    if (nets !== lastNets && document.activeElement?.id !== 'net') {
+      lastNets = nets;
+      document.getElementById('net').innerHTML = (s.nets || []).map(n => `<option value="${esc(n.key)}" ${n.key === s.net ? 'selected' : ''}>${esc(n.label)}</option>`).join('');
+      const label = (s.nets || []).find(n => n.key === s.net)?.label || '';
+      document.getElementById('nethint').textContent = s.net === 'auto'
+        ? 'Showing PCs on every network this PC can reach. Home network is preferred; ZeroTier or Tailscale is used when you are away.'
+        : 'Showing only PCs reachable over ' + label + '.';
+    }
+    const pcs = JSON.stringify([s.pcs, s.client_note]);
+    if (pcs !== lastPcs) { lastPcs = pcs; renderPcs(s); }
+    const local = JSON.stringify(s.local);
+    if (local !== lastLocal) { lastLocal = local; renderLocal(s.local || []); }
+    if (document.getElementById('banner').textContent.startsWith('USBeam is not responding')) banner('');
+  } catch (e) { banner('USBeam is not responding. It may have been closed.'); }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

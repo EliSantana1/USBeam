@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 the USBeam contributors
 //
-// usbeam_host.c - USBeam host for Windows (test version 6).
+// usbeam_host.c - USBeam for Windows: host engine (test version 7). App, client and window: app_win.c
 //
 // - Lists removable USB devices and lets you share / stop sharing them.
 // - Sharing switches the device to Microsoft's built-in, Microsoft-signed
@@ -25,6 +25,9 @@
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <iphlpapi.h>
+#include <wincrypt.h>
+#include <shellapi.h>
 #include <initguid.h>
 #include <devpkey.h>
 #include <winusb.h>
@@ -130,8 +133,11 @@ typedef struct Dev {
     uint8_t iface_class[MAX_IFACES][3];
     uint32_t speed;
     // sharing policy
-    int wanted;              // user marked it as shared (available to clients)
-    int auto_rc;             // auto-reconnect after a replug
+    int wanted;              // offered to other PCs (computed: not hidden, not a network adapter, drives only if chosen)
+    int auto_rc;             // (unused, kept for compatibility)
+    int is_net, is_storage;  // network adapter / opt-in device: drive or radio (set by refresh)
+    int is_radio;            // Bluetooth / wireless adapter (opt-in like drives)
+    int hidden, share_forced;// user's choice: "Don't share" / "Share" (drives)
     int blocked;             // temporarily kept on this PC (refuse clients)
     int returning;           // was unplugged during a session; give back to PC when it returns
     ULONGLONG hold_until;    // reconnect countdown end (GetTickCount64), 0 = none
@@ -175,7 +181,19 @@ static Dev *dev_slot(const wchar_t *inst) {
         memset(d, 0, sizeof *d);
         d->used = 1;
         wcsncpy(d->inst, inst, 255);
-        snprintf(d->busid, sizeof d->busid, "1-%d", g_next_bus++);
+        // Stable bus id derived from the device's Windows identity, so other PCs can
+        // reconnect to the same id after this PC restarts.
+        unsigned h = 2166136261u;
+        for (const wchar_t *q = inst; *q; q++) h = (h ^ (unsigned)towupper(*q)) * 16777619u;
+        int n = (int)(h % 9000) + 100;
+        for (;;) {
+            snprintf(d->busid, sizeof d->busid, "1-%d", n);
+            int clash = 0;
+            for (int k = 0; k < MAX_DEVS; k++) if (&g_devs[k] != d && g_devs[k].used && !strcmp(g_devs[k].busid, d->busid)) clash = 1;
+            if (!clash) break;
+            n = n >= 9099 ? 100 : n + 1;
+        }
+        (void)g_next_bus;
         InitializeCriticalSection(&d->send_cs);
         d->client = INVALID_SOCKET;
         d->file = INVALID_HANDLE_VALUE;
@@ -185,8 +203,39 @@ static Dev *dev_slot(const wchar_t *inst) {
 }
 
 static BOOL read_descriptors(Dev *d);
+
+// Network adapters are never offered (taking one could cut the connection USBeam itself
+// uses). Drives are only offered when the user chooses to, so open files aren't cut off.
+static const wchar_t *NET_CLASS = L"{4d36e972-e325-11ce-bfc1-08002be10318}";
+static const wchar_t *BT_CLASS = L"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}";
+static int g_radio_flag;
+static void classify_walk(DEVINST di, int depth, int *net, int *stor) {
+    wchar_t buf[128]; ULONG len;
+    len = sizeof buf; buf[0] = 0;
+    if (CM_Get_DevNode_Registry_PropertyW(di, CM_DRP_CLASSGUID, NULL, buf, &len, 0) == CR_SUCCESS) {
+        if (!_wcsicmp(buf, NET_CLASS)) *net = 1;
+        if (!_wcsicmp(buf, BT_CLASS)) { *stor = 1; g_radio_flag = 1; }
+    }
+    len = sizeof buf; buf[0] = 0;
+    if (CM_Get_DevNode_Registry_PropertyW(di, CM_DRP_SERVICE, NULL, buf, &len, 0) == CR_SUCCESS &&
+        (!_wcsicmp(buf, L"USBSTOR") || !_wcsicmp(buf, L"UASPStor"))) *stor = 1;
+    if (depth >= 2) return;
+    DEVINST c;
+    if (CM_Get_Child(&c, di, 0) != CR_SUCCESS) return;
+    do classify_walk(c, depth + 1, net, stor); while (CM_Get_Sibling(&c, c, 0) == CR_SUCCESS);
+}
+static void classify_device(struct Dev *d, const wchar_t *svc);
 static uint32_t hub_speed(const wchar_t *inst);
 static BOOL hub_descriptors(Dev *d);
+
+static void classify_device(Dev *d, const wchar_t *svc) {
+    if (d->in_use || d->busy || d->on_winusb) return;      // keep what we learned before the driver switch
+    DEVINST di;
+    int net = 0, stor = !_wcsicmp(svc, L"USBSTOR") || !_wcsicmp(svc, L"UASPStor");
+    g_radio_flag = 0;
+    if (CM_Locate_DevNodeW(&di, (DEVINSTID_W)d->inst, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) classify_walk(di, 0, &net, &stor);
+    d->is_net = net; d->is_storage = stor; d->is_radio = g_radio_flag;
+}
 
 // Rescan USB devices. Only top-level, removable, non-hub devices are listed.
 static void refresh_devices(void) {
@@ -217,7 +266,9 @@ static void refresh_devices(void) {
         DEVPROPTYPE t; d->name[0] = 0;
         if (!SetupDiGetDevicePropertyW(set, &dev, &DEVPKEY_Device_BusReportedDeviceDesc, &t, (BYTE *)d->name, sizeof d->name, NULL, 0) || !d->name[0])
             get_prop(set, &dev, SPDRP_DEVICEDESC, d->name, sizeof d->name);
-        if (d->wanted && !d->have_desc && !d->in_use && !d->busy) hub_descriptors(d);
+        classify_device(d, svc);
+        d->wanted = !d->is_net && !d->hidden && (!d->is_storage || d->share_forced);
+        if (d->wanted && d->removable && !d->have_desc && !d->in_use && !d->busy) hub_descriptors(d);
     }
     if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
     LeaveCriticalSection(&g_devs_cs);
@@ -775,6 +826,9 @@ static void urb_loop(Dev *d) {
 }
 
 // ================================================================ connections
+#define OP_REQ_INFO 0x8FE1        // USBeam extension: device names and states as JSON
+#define OP_REP_INFO 0x0FE1
+static void handle_info(SOCKET s);
 typedef struct { SOCKET s; char peer[64]; } Conn;
 
 static Dev *find_shared(const char *busid) {
@@ -792,6 +846,7 @@ static DWORD WINAPI conn_main(LPVOID arg) {
     if (!recv_all(s, op, 8)) goto done;
     uint16_t code = op[2] << 8 | op[3];
 
+    if (code == OP_REQ_INFO) { handle_info(s); goto done; }
     if (code == OP_REQ_DEVLIST) {
         refresh_devices();
         EnterCriticalSection(&g_devs_cs);
@@ -892,201 +947,4 @@ static DWORD WINAPI server_main(LPVOID arg) {
     return 0;
 }
 
-// ================================================================ settings file
-static char g_cfg_path[MAX_PATH];
-
-static void save_config(void) {
-    FILE *f = fopen(g_cfg_path, "w");
-    if (!f) return;
-    for (int i = 0; i < MAX_DEVS; i++)
-        if (g_devs[i].used && g_devs[i].wanted) fprintf(f, "%d|%ls\n", g_devs[i].auto_rc, g_devs[i].inst);
-    fclose(f);
-}
-
-static void load_config(void) {
-    FILE *f = fopen(g_cfg_path, "r");
-    if (!f) return;
-    char line[600];
-    while (fgets(line, sizeof line, f)) {
-        int a = 0; char inst[512] = "";
-        if (sscanf(line, "%d|%511[^\r\n]", &a, inst) != 2) continue;
-        wchar_t w[256]; MultiByteToWideChar(CP_UTF8, 0, inst, -1, w, 256);
-        Dev *d = dev_slot(w);
-        if (d) { d->wanted = 1; d->auto_rc = a; }
-    }
-    fclose(f);
-}
-
-// ================================================================ background monitor
-// Once a second: return replugged devices to this PC, run reconnect
-// countdowns, and fix any device left on the sharing driver.
-static int g_view[MAX_DEVS], g_view_n;
-static int view_number(Dev *d) {
-    for (int i = 0; i < g_view_n; i++) if (&g_devs[g_view[i]] == d) return i + 1;
-    return 0;
-}
-
-static DWORD WINAPI monitor_main(LPVOID arg) {
-    for (;;) {
-        Sleep(1000);
-        refresh_devices();
-        ULONGLONG now = GetTickCount64();
-        for (int i = 0; i < MAX_DEVS; i++) {
-            Dev *d = &g_devs[i];
-            if (!d->used || d->in_use || d->busy) continue;
-            if (d->present && d->on_winusb) {            // left on sharing driver: give it back
-                InterlockedExchange(&d->busy, 1);
-                if (d->returning) say("[%s] %ls was plugged back in. Returning it to this PC...", d->busid, d->name);
-                revert_driver(d);
-                if (d->returning) {
-                    d->returning = 0;
-                    if (d->wanted && d->auto_rc) {
-                        d->hold_until = GetTickCount64() + 10000; d->last_shown = 0;
-                        say("[%s] %ls works on this PC now. It will reconnect to %s in 10 seconds. Type C %d to cancel.",
-                            d->busid, d->name, d->last_peer, view_number(d));
-                    } else {
-                        say("[%s] %ls works on this PC now and will stay here. Type S %d to share it again.", d->busid, d->name, view_number(d));
-                    }
-                }
-                InterlockedExchange(&d->busy, 0);
-                continue;
-            }
-            if (d->hold_until) {
-                if (now >= d->hold_until) {
-                    d->hold_until = 0; d->blocked = 0;
-                    say("[%s] Reconnect countdown finished: %ls is available to %s again.", d->busid, d->name, d->last_peer);
-                } else {
-                    int left = (int)((d->hold_until - now + 999) / 1000);
-                    if (left != d->last_shown && (left <= 5 || left % 5 == 0)) {
-                        d->last_shown = left;
-                        say("[%s] Reconnecting %ls in %d s... (C %d to cancel)", d->busid, d->name, left, view_number(d));
-                    }
-                }
-            }
-        }
-    }
-    return 0;
-}
-
-// ================================================================ console UI
-static void print_menu(void) {
-    refresh_devices();
-    EnterCriticalSection(&g_devs_cs);
-    printf("\n================ USB devices on this PC ================\n");
-    g_view_n = 0;
-    for (int i = 0; i < MAX_DEVS; i++) {
-        Dev *d = &g_devs[i];
-        if (!d->used || !d->present || !d->removable) continue;
-        g_view[g_view_n++] = i;
-        char st[128];
-        if (d->busy) snprintf(st, sizeof st, "switching driver...");
-        else if (d->in_use) snprintf(st, sizeof st, "IN USE by %s", d->peer);
-        else if (!d->wanted) snprintf(st, sizeof st, "not shared");
-        else if (d->hold_until) snprintf(st, sizeof st, "reconnecting soon (C to cancel)");
-        else if (d->blocked) snprintf(st, sizeof st, "kept on this PC (S to share again)");
-        else snprintf(st, sizeof st, "shared - works here until a client connects");
-        printf(" %2d) %04X:%04X  %-28.28ls %-44s auto-reconnect: %s\n", g_view_n, d->vid, d->pid, d->name, st, d->wanted ? (d->auto_rc ? "ON" : "off") : "-");
-    }
-    if (!g_view_n) printf(" (no removable USB devices found)\n");
-    LeaveCriticalSection(&g_devs_cs);
-    printf("--------------------------------------------------------\n");
-    printf(" S <n> share          U <n> stop sharing (returns it to this PC)\n");
-    printf(" A <n> auto-reconnect on/off          C <n> cancel a reconnect countdown\n");
-    printf(" R     refresh list   Q     quit\n");
-    printf("> ");
-    fflush(stdout);
-}
-
-static Dev *pick(int n) {
-    if (n < 1 || n > g_view_n) { printf("  No device number %d.\n", n); return NULL; }
-    return &g_devs[g_view[n - 1]];
-}
-
-int main(int argc, char **argv) {
-    InitializeCriticalSection(&g_log_cs);
-    InitializeCriticalSection(&g_devs_cs);
-    InitializeCriticalSection(&g_hubdesc_cs);
-    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "-v")) g_verbose = 1;
-    char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
-    char *sl = strrchr(path, '\\'); if (sl) strcpy(sl + 1, "usbeam_log.txt");
-    g_log = fopen(path, "a");
-    if (sl) strcpy(sl + 1, "usbeam_settings.txt");
-    strcpy(g_cfg_path, path);
-    logm("======== USBeam host started (test version 6)");
-
-    HMODULE nd = LoadLibraryW(L"newdev.dll");
-    pDiInstallDevice = nd ? (DiInstallDevice_t)GetProcAddress(nd, "DiInstallDevice") : NULL;
-    pDiUninstallDevice = nd ? (DiUninstallDevice_t)GetProcAddress(nd, "DiUninstallDevice") : NULL;
-    if (!pDiInstallDevice || !pDiUninstallDevice) { say("ERROR: newdev.dll functions missing."); getchar(); return 1; }
-
-    WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
-    SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    BOOL excl = TRUE; setsockopt(ls, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&excl, sizeof excl);
-    struct sockaddr_in a = {0};
-    a.sin_family = AF_INET; a.sin_port = htons(USBIP_PORT); a.sin_addr.s_addr = INADDR_ANY;
-    if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 8)) {
-        say("ERROR: cannot use network port %d (%d). Close any other copy of this program.", USBIP_PORT, WSAGetLastError());
-        getchar(); return 1;
-    }
-    char host[256] = ""; gethostname(host, sizeof host);
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET;
-    printf("USBeam host for Windows - test version 6\nThis PC's network addresses:");
-    if (!getaddrinfo(host, NULL, &hints, &res)) {
-        for (struct addrinfo *p = res; p; p = p->ai_next) {
-            char ip[64]; inet_ntop(AF_INET, &((struct sockaddr_in *)p->ai_addr)->sin_addr, ip, sizeof ip);
-            printf("  %s", ip);
-        }
-        freeaddrinfo(res);
-    }
-    printf("\nShared devices are offered on port %d.\n", USBIP_PORT);
-
-    load_config();
-    refresh_devices();
-    // Safety net: anything left on the sharing driver (crash, power loss) goes back to this PC.
-    for (int i = 0; i < MAX_DEVS; i++) {
-        Dev *d = &g_devs[i];
-        if (d->used && d->present && d->on_winusb) { say("Returning %ls to this PC (was left on the sharing driver).", d->name); revert_driver(d); }
-    }
-    CloseHandle(CreateThread(NULL, 0, server_main, (LPVOID)(uintptr_t)ls, 0, NULL));
-    CloseHandle(CreateThread(NULL, 0, monitor_main, NULL, 0, NULL));
-
-    char line[128];
-    for (;;) {
-        print_menu();
-        if (!fgets(line, sizeof line, stdin)) break;
-        char c = 0; int n = 0;
-        sscanf(line, " %c %d", &c, &n);
-        c = (char)toupper((unsigned char)c);
-        if (c == 'Q') break;
-        if (c == 'R' || c == 0) continue;
-        if (!strchr("SUAC", c)) { printf("  Unknown command.\n"); continue; }
-        Dev *d = pick(n);
-        if (!d) continue;
-        if (c == 'S') {
-            if (d->wanted && !d->blocked && !d->hold_until) { printf("  Already shared.\n"); continue; }
-            d->wanted = 1; d->blocked = 0; d->hold_until = 0;
-            if (!d->have_desc) hub_descriptors(d);
-            save_config();
-            say("%ls is now shared. It keeps working on this PC until a client connects to it.", d->name);
-        } else if (c == 'U') {
-            if (!d->wanted) { printf("  That device is not shared.\n"); continue; }
-            d->wanted = 0; d->auto_rc = 0; d->blocked = 0; d->hold_until = 0; d->returning = 0;
-            save_config();
-            if (d->in_use) { say("Disconnecting %s from %ls...", d->peer, d->name); end_session(d); }
-            say("%ls is no longer shared and stays on this PC.", d->name);
-        } else if (c == 'A') {
-            if (!d->wanted) { printf("  Share the device first (S %d).\n", n); continue; }
-            d->auto_rc = !d->auto_rc;
-            save_config();
-            say("Auto-reconnect for %ls is now %s.", d->name, d->auto_rc ? "ON" : "off");
-        } else if (c == 'C') {
-            if (!d->hold_until) { printf("  No countdown running for that device.\n"); continue; }
-            d->hold_until = 0; d->blocked = 1;
-            say("Reconnect cancelled. %ls stays on this PC. Type S %d to share it again.", d->name, n);
-        }
-    }
-    logm("======== USBeam host exiting");
-    return 0;
-}
+#include "app_win.c"
