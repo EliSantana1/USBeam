@@ -8,7 +8,8 @@ pkgdesc="Free, open-source USB over IP: share USB devices between your computers
 arch=('x86_64' 'aarch64')
 url="https://github.com/EliSantana1/USBeam"
 license=('GPL-3.0-or-later')
-depends=('qt6-webengine' 'qt6-base' 'glibc' 'polkit')
+depends=('qt6-webengine' 'qt6-base' 'glibc')
+optdepends=('polkit: let the tray menu stop and start USBeam without a password (present on all desktops)')
 makedepends=('gcc' 'python')
 install=usbeam.install
 
