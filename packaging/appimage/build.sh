@@ -11,8 +11,13 @@ ARCH=x86_64
 echo "== tools"
 sudo apt-get update -q
 sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build python3 file patchelf desktop-file-utils \
-    qt6-base-dev qt6-base-dev-tools qt6-webengine-dev qt6-webengine-dev-tools libqt6webenginecore6-bin \
-    qt6-wayland libqt6svg6 qt6-image-formats-plugins libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+    qt6-base-dev qt6-base-dev-tools qt6-webengine-dev qt6-webengine-dev-tools \
+    libqt6webenginecore6-bin libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+# Extras (Wayland, SVG icons, image formats, what Qt WebEngine may also look for): each one if it exists.
+for p in libqt6opengl6-dev qt6-declarative-dev libvulkan-dev qt6-wayland libqt6svg6 libqt6svg6-dev qt6-image-formats-plugins qt6-webchannel-dev qt6-positioning-dev \
+         libqt6webchannel6 libqt6positioning6 qt6-qpa-plugins; do
+    sudo apt-get install -y -q --no-install-recommends "$p" || echo "(skipped $p)"
+done
 
 echo "== engine (static: runs on any distribution)"
 make linux
@@ -49,8 +54,14 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 export QMAKE=/usr/lib/qt6/bin/qmake
 [ -x "$QMAKE" ] || QMAKE=$(command -v qmake6)
 export EXTRA_QT_MODULES="svg"
-export EXTRA_QT_PLUGINS="svg"
-export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
+# Wayland support, if it was installed above.
+PLAT=$("$QMAKE" -query QT_INSTALL_PLUGINS)/platforms
+WL=""
+for f in libqwayland-generic.so libqwayland-egl.so; do
+    if [ -f "$PLAT/$f" ]; then WL="${WL:+$WL;}$f"; fi
+done
+if [ -n "$WL" ]; then export EXTRA_PLATFORM_PLUGINS="$WL"; fi
+echo "Wayland plugins: ${WL:-none}"
 ./linuxdeploy --appdir "$APPDIR" --plugin qt \
     --desktop-file "$APPDIR/usr/share/applications/usbeam.desktop" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/scalable/apps/usbeam.svg"
