@@ -81,13 +81,16 @@ static uint32_t ip_u32(const char *ip) {
     return a << 24 | b << 16 | c << 8 | d;
 }
 // Which kind of network an address of another PC belongs to.
-static int net_kind(const char *ip) {
+static int net_kind_in(const char *ip, const LocalNet *ln, int n) {
     uint32_t a = ip_u32(ip);
     if ((a & 0xFFC00000u) == 0x64400000u) return NET_TS;          // 100.64.0.0/10: Tailscale
-    LocalNet ln[16];
-    int n = plat_local_nets(ln, 16);
     for (int i = 0; i < n; i++) if ((a & ln[i].mask) == ln[i].net) return ln[i].kind;
     return NET_HOME;
+}
+static int net_kind(const char *ip) {
+    LocalNet ln[16];
+    int n = plat_local_nets(ln, 16);
+    return net_kind_in(ip, ln, n);
 }
 
 // ---------------------------------------------------------------- tables (call with cl_lock held)
@@ -311,7 +314,23 @@ static void client_tick(void) {
     // 1. Poll every address of every PC that is due.
     // A PC that isn't answering gets a short time limit, so it can't slow everything else down.
     char ips[CL_MAXR * CL_MAXA][64]; int tmo[CL_MAXR * CL_MAXA]; int nip = 0;
+    // Which network each address is on can change: ZeroTier or Tailscale often start after USBeam
+    // (at boot), and networks come and go. Re-check every 10 seconds.
+    static unsigned long long next_kinds;
+    LocalNet kln[16]; int kn = -1;
+    if (now >= next_kinds) { next_kinds = now + 10000; kn = plat_local_nets(kln, 16); }
     cl_lock();
+    if (kn >= 0)
+        for (int i = 0; i < CL_MAXR; i++) {
+            Remote *r = &g_r[i];
+            if (!r->id[0]) continue;
+            int changed = 0;
+            for (int k = 0; k < r->naddr; k++) {
+                int kind = net_kind_in(r->addr[k].ip, kln, kn);
+                if (kind != r->addr[k].kind) { r->addr[k].kind = kind; changed = 1; }
+            }
+            if (changed) r->via = rm_pick(r);
+        }
     for (int i = 0; i < CL_MAXR; i++) {
         Remote *r = &g_r[i];
         if (!r->id[0] || now < r->next_poll) continue;
