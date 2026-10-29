@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 #define USBDEV "/sys/bus/usb/devices"
 #define STUB "/sys/bus/usb/drivers/usbip-host"
@@ -279,6 +280,109 @@ static void handle_devlist(int s, const char *peer) {
     logm("%s listed devices (%d available)", peer, m);
 }
 
+// ---------------------------------------------------------------- relay between the client and the kernel
+// The kernel's usbip-host takes requests straight from a socket. Windows clients (usbip-win2)
+// mark many reads "a short reply is an error" (URB_SHORT_NOT_OK). Windows itself ignores that
+// mark, but Linux obeys it, so devices like some game controllers fail (-121, EREMOTEIO).
+// USBeam sits in between: requests pass through unchanged except that this mark is removed;
+// replies pass through untouched.
+typedef struct { int client, kern; int refs; pthread_mutex_t mx; char busid[32]; } Relay;
+
+static void relay_drop(Relay *r) {
+    pthread_mutex_lock(&r->mx);
+    int left = --r->refs;
+    pthread_mutex_unlock(&r->mx);
+    shutdown(r->client, SHUT_RDWR);            // wake the other direction
+    shutdown(r->kern, SHUT_RDWR);
+    if (left) return;
+    close(r->client); close(r->kern);
+    pthread_mutex_destroy(&r->mx);
+    free(r);
+}
+
+static int relay_copy(int from, int to, uint64_t n, uint8_t *buf, size_t bufsz) {
+    while (n) {
+        size_t k = n < bufsz ? (size_t)n : bufsz;
+        if (recv_all(from, buf, k) || send_all(to, buf, k)) return -1;
+        n -= k;
+    }
+    return 0;
+}
+
+// Client -> kernel: forward whole requests, clearing URB_SHORT_NOT_OK.
+static void *relay_up(void *arg) {
+    Relay *r = arg;
+    uint8_t h[48], *buf = malloc(65536);
+    int fixed = 0;
+    while (buf && !recv_all(r->client, h, 48)) {
+        uint32_t cmd = (uint32_t)h[0] << 24 | h[1] << 16 | h[2] << 8 | h[3];
+        uint64_t extra = 0;
+        if (cmd == 1) {                                         // CMD_SUBMIT
+            uint32_t dir = (uint32_t)h[12] << 24 | h[13] << 16 | h[14] << 8 | h[15];
+            uint32_t len = (uint32_t)h[24] << 24 | h[25] << 16 | h[26] << 8 | h[27];
+            uint32_t np = (uint32_t)h[32] << 24 | h[33] << 16 | h[34] << 8 | h[35];
+            if (h[23] & 0x01) { h[23] &= (uint8_t)~0x01; if (!fixed++) logm("[%s] relaying with short replies allowed", r->busid); }
+            if (dir == 0) extra += len;                         // OUT: data follows
+            if (np != 0xFFFFFFFFu && np > 0) {
+                if (np > 1024) break;                           // not a sane request
+                extra += (uint64_t)np * 16;                     // isochronous packet descriptors
+            }
+            if (extra > (64u << 20)) break;
+        } else if (cmd != 2) {                                  // only CMD_SUBMIT and CMD_UNLINK exist
+            logm("[%s] unexpected data from the other PC: closing the connection", r->busid);
+            break;
+        }
+        if (send_all(r->kern, h, 48) || relay_copy(r->client, r->kern, extra, buf, 65536)) break;
+    }
+    free(buf);
+    relay_drop(r);
+    return NULL;
+}
+
+// Kernel -> client: replies, passed through untouched.
+static void *relay_down(void *arg) {
+    Relay *r = arg;
+    uint8_t *buf = malloc(65536);
+    ssize_t n;
+    while (buf && (n = recv(r->kern, buf, 65536, 0)) > 0) if (send_all(r->client, buf, (size_t)n)) break;
+    free(buf);
+    relay_drop(r);
+    return NULL;
+}
+
+// A connected pair of sockets on this PC: *kern goes to the kernel, *mine to the relay.
+static int loopback_pair(int *kern, int *mine) {
+    struct sockaddr_in a = {0}; socklen_t al = sizeof a;
+    a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    if (l < 0) return -1;
+    if (bind(l, (struct sockaddr *)&a, sizeof a) || listen(l, 1) || getsockname(l, (struct sockaddr *)&a, &al)) { close(l); return -1; }
+    int k = socket(AF_INET, SOCK_STREAM, 0);
+    if (k < 0 || connect(k, (struct sockaddr *)&a, sizeof a)) { if (k >= 0) close(k); close(l); return -1; }
+    int m = accept(l, NULL, NULL);
+    close(l);
+    if (m < 0) { close(k); return -1; }
+    int one = 1;
+    setsockopt(k, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    setsockopt(m, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    *kern = k; *mine = m;
+    return 0;
+}
+
+static int relay_start(int client, int mine, const char *busid) {
+    Relay *r = calloc(1, sizeof *r);
+    if (!r) return -1;
+    r->client = client; r->kern = mine; r->refs = 2;
+    snprintf(r->busid, sizeof r->busid, "%s", busid);
+    pthread_mutex_init(&r->mx, NULL);
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_t t1, t2;
+    if (pthread_create(&t1, &at, relay_up, r)) { pthread_attr_destroy(&at); close(mine); pthread_mutex_destroy(&r->mx); free(r); return -1; }   // caller closes client
+    if (pthread_create(&t2, &at, relay_down, r)) relay_drop(r);    // up thread holds the last reference
+    pthread_attr_destroy(&at);
+    return 0;
+}
+
 static void handle_import(int s, const char *peer) {
     char busid[33] = {0};
     if (recv_all(s, busid, 32)) return;
@@ -291,15 +395,34 @@ static void handle_import(int s, const char *peer) {
     char p[PATH_MAX], v[32];
     snprintf(p, sizeof p, USBDEV "/%s/usbip_sockfd", busid);
     for (int i = 0; i < 20 && access(p, W_OK) != 0; i++) usleep(50000);
-    snprintf(v, sizeof v, "%d", s);
-    fill_record(busid, r + 8);
-    if (write_sysfs(p, v) < 0) {
-        logm("[%s] kernel refused export: %s", busid, strerror(errno));
+    int kern, mine;
+    if (loopback_pair(&kern, &mine) < 0) {
+        logm("[%s] could not set up the connection: %s", busid, strerror(errno));
         return_to_host(busid);
         put32b(r + 4, 1); send_all(s, r, 8);
         return;
     }
+    snprintf(v, sizeof v, "%d", kern);
+    fill_record(busid, r + 8);
+    if (write_sysfs(p, v) < 0) {
+        logm("[%s] kernel refused export: %s", busid, strerror(errno));
+        close(kern); close(mine);
+        return_to_host(busid);
+        put32b(r + 4, 1); send_all(s, r, 8);
+        return;
+    }
+    close(kern);                                 // the kernel holds its own reference
     send_all(s, r, sizeof r);
+    struct timeval z = {0, 0};                   // from now on: no time limits on this connection
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &z, sizeof z);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &z, sizeof z);
+    int c = dup(s);                              // the caller closes s; the relay keeps its own copy
+    if (c < 0 || relay_start(c, mine, busid) < 0) {
+        logm("[%s] could not start the relay", busid);
+        if (c >= 0) close(c);
+        return_to_host(busid);
+        return;
+    }
     HostDev *h = hdev(busid, 1);
     h->exported = 1; h->returning = 0;
     snprintf(h->peer, sizeof h->peer, "%s", peer);
