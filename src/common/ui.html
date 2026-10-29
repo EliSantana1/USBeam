@@ -119,6 +119,7 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
       <p class="hint">Closing this window keeps USBeam running. Open it again from its tray icon.</p>
       <div class="box" id="local"></div>
       <div id="trusted"></div>
+      <p class="hint" id="ver" style="margin-top:22px"></p>
     </section>
   </div>
 </main>
@@ -260,6 +261,7 @@ async function refresh() {
     if (r.status === 403) { banner('This window is out of date. Open USBeam again from its icon.'); return; }
     const s = await r.json();
     document.getElementById('pcname').textContent = 'This PC: ' + (s.name || '');
+    document.getElementById('ver').textContent = s.version ? 'USBeam ' + s.version : '';
     const nets = JSON.stringify([s.nets, s.net]);
     if (nets !== lastNets && document.activeElement?.id !== 'net') {
       lastNets = nets;

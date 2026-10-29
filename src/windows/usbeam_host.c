@@ -70,8 +70,22 @@ typedef BOOL (WINAPI *DiUninstallDevice_t)(HWND, HDEVINFO, PSP_DEVINFO_DATA, DWO
 
 // ================================================================ logging
 static FILE *g_log;
+static wchar_t g_log_path[MAX_PATH];
 static CRITICAL_SECTION g_log_cs;
 static int g_verbose;
+
+// The log is kept small: past 2 MB it moves to usbeam.old.log (replacing the previous one).
+#define LOG_MAX (2L * 1024 * 1024)
+static void log_open(void) {
+    if (!g_log_path[0]) return;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(g_log_path, GetFileExInfoStandard, &fa) && (fa.nFileSizeHigh || fa.nFileSizeLow > LOG_MAX)) {
+        wchar_t old[MAX_PATH]; wcscpy(old, g_log_path);
+        wchar_t *dot = wcsrchr(old, L'.'); if (dot) wcscpy(dot, L".old.log");
+        MoveFileExW(g_log_path, old, MOVEFILE_REPLACE_EXISTING);
+    }
+    g_log = _wfopen(g_log_path, L"a");
+}
 
 static void logm(const char *fmt, ...) {
     EnterCriticalSection(&g_log_cs);
@@ -79,7 +93,10 @@ static void logm(const char *fmt, ...) {
     char pre[32];
     snprintf(pre, sizeof pre, "%02d:%02d:%02d.%03d ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
     va_list ap;
-    if (g_log) { fputs(pre, g_log); va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap); fputc('\n', g_log); fflush(g_log); }
+    if (g_log) {
+        fputs(pre, g_log); va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap); fputc('\n', g_log); fflush(g_log);
+        if (ftell(g_log) > LOG_MAX) { fclose(g_log); g_log = NULL; log_open(); }
+    }
     LeaveCriticalSection(&g_log_cs);
 }
 // console + log
@@ -123,6 +140,7 @@ typedef struct Dev {
     char busid[32];
     // refreshed info
     int present, removable, on_winusb;
+    int was_present;          // present at the previous scan (to log new devices only once)
     wchar_t name[256];
     wchar_t service[64];
     uint16_t vid, pid;
@@ -257,7 +275,7 @@ static BOOL via_usbip(const wchar_t *inst) {
 // Rescan USB devices. Only top-level, removable, non-hub devices are listed.
 static void refresh_devices(void) {
     EnterCriticalSection(&g_devs_cs);
-    for (int i = 0; i < MAX_DEVS; i++) { if (g_devs[i].present == 0) g_devs[i].have_desc = 0; g_devs[i].present = 0; }
+    for (int i = 0; i < MAX_DEVS; i++) { if (g_devs[i].present == 0) g_devs[i].have_desc = 0; g_devs[i].was_present = g_devs[i].present; g_devs[i].present = 0; }
     HDEVINFO set = SetupDiGetClassDevsW(NULL, L"USB", NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
     SP_DEVINFO_DATA dev = { sizeof(dev) };
     for (DWORD i = 0; set != INVALID_HANDLE_VALUE && SetupDiEnumDeviceInfo(set, i, &dev); i++) {
@@ -273,7 +291,7 @@ static void refresh_devices(void) {
         SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_CAPABILITIES, NULL, (BYTE *)&caps, sizeof caps, NULL);
         Dev *d = dev_slot(inst);
         if (!d) continue;
-        if (!d->present) logm("scan: %ls  service=%ls  caps=0x%lX  hw=%ls", inst, svc, caps, hw);
+        if (!d->was_present) logm("scan: %ls  service=%ls  caps=0x%lX  hw=%ls", inst, svc, caps, hw);
         d->present = 1;
         d->removable = (caps & CM_DEVCAP_REMOVABLE) != 0;
         wcsncpy(d->service, svc, 63);

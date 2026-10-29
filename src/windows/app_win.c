@@ -7,6 +7,7 @@
 
 #define COBJMACROS
 #include <netlistmgr.h>
+#include "../common/version.h"
 #include "../common/http.h"
 #include "../common/client_types.h"
 #include "ui_html.h"
@@ -161,7 +162,7 @@ static int plat_networks(NetInfo *out, int max) {
                 NetInfo *x = &out[n++];
                 memset(x, 0, sizeof *x);
                 x->kind = (ip & 0xFFC00000u) == 0x64400000u ? NET_TS : kind;
-                x->net = ip & m; x->mask = m;
+                x->net = ip & m; x->mask = m; x->ip = ip;
                 snprintf(x->id, sizeof x->id, "%s", a->AdapterName);
                 if (x->kind == NET_ZT) snprintf(x->name, sizeof x->name, "ZeroTier");
                 else if (x->kind == NET_TS) snprintf(x->name, sizeof x->name, "Tailscale");
@@ -348,12 +349,34 @@ static int usbip_ports(Attached *a, int max) {
     return n;
 }
 
+// usbip-win2 reconnects by itself (for up to 2 hours) when a connection drops. USBeam turns
+// that off and decides itself (Auto-reconnect): "--once" on attach, and "--stop-all" whenever
+// a connection ends. Older usbip-win2 versions without these options still work.
+static int g_no_once, g_no_stopall;
+static int usbip_unknown_option(const char *out) {
+    return strstr(out, "not expected") || strstr(out, "nrecognized") || strstr(out, "--help") || strstr(out, "xtraArgs");
+}
+static void usbip_stop_retries(void) {
+    if (g_no_stopall || !have_usbip()) return;
+    char out[1024] = "";
+    run_hidden(g_usbip_exe, L"attach --stop-all", out, sizeof out, 15000);
+    if (usbip_unknown_option(out)) { g_no_stopall = 1; logm("usbip-win2 has no --stop-all option (older version)"); }
+}
+
 static int usbip_attach(const char *host, const char *busid) {
     wchar_t args[256];
-    _snwprintf(args, 256, L"attach -r %hs -b %hs", host, busid);
+    char out[2048] = "";
+    _snwprintf(args, 256, L"attach -r %hs -b %hs%ls", host, busid, g_no_once ? L"" : L" --once");
     args[255] = 0;
-    char out[2048];
     run_hidden(g_usbip_exe, args, out, sizeof out, 60000);
+    if (!g_no_once && usbip_unknown_option(out)) {
+        g_no_once = 1;
+        logm("usbip-win2 has no --once option (older version): attaching without it");
+        _snwprintf(args, 256, L"attach -r %hs -b %hs", host, busid);
+        args[255] = 0;
+        out[0] = 0;
+        run_hidden(g_usbip_exe, args, out, sizeof out, 60000);
+    }
     char *p = strstr(out, "port ");
     if (strstr(out, "succes") && p) { logm("attach %s %s: %s", host, busid, out); return atoi(p + 5); }
     logm("attach %s %s failed: %s", host, busid, out);
@@ -377,11 +400,23 @@ static int plat_port_alive(int port, const char *ip, const char *busid) {
     return 0;
 }
 static void plat_detach(int port) { usbip_detach(port); }
+static void plat_stop_retries(void) { usbip_stop_retries(); }
+static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) {
+    int n = 0;
+    for (int k = 0; k < g_natt && n < max; k++) {
+        port[n] = g_att[k].port;
+        snprintf(ip[n], 64, "%s", g_att[k].host);
+        snprintf(busid[n], 32, "%s", g_att[k].busid);
+        n++;
+    }
+    return n;
+}
 static const char *plat_client_note(void) {
     return have_usbip() ? NULL : "To use devices from other PCs on this Windows PC, the usbip-win2 driver is needed (github.com/vadimgrn/usbip-win2). The USBeam installer will include it.";
 }
 
 static DWORD WINAPI client_main(LPVOID arg) {
+    if (have_usbip()) usbip_stop_retries();      // nothing reconnects behind USBeam's back
     for (;;) {
         if (WaitForSingleObject(g_quit_event, 1000) == WAIT_OBJECT_0) break;
         client_tick();
@@ -527,7 +562,8 @@ static void add_local_json(sb_t *j) {
         sb_add(j, ",\"name\":", 8); sb_jstr(j, name);
         sb_printf(j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"fixed\":%s,\"peer\":",
                   d->vid, d->pid, st, cd, d->is_net ? "true" : "false");
-        sb_jstr(j, d->in_use ? d->peer : "");
+        char pl[160] = ""; if (d->in_use) peer_label(d->peer, pl, sizeof pl, 0);
+        sb_jstr(j, pl);
         sb_add(j, ",\"note\":", 8); sb_jstr(j, note);
         sb_add(j, "}", 1);
     }
@@ -537,7 +573,7 @@ static void add_local_json(sb_t *j) {
 
 static int ui_api(const char *method, const char *path, const char *body, sb_t *out) {
     if (!strcmp(method, "GET") && !strcmp(path, "/api/state")) {
-        sb_printf(out, "%s", "{\"os\":\"windows\",\"name\":"); sb_jstr(out, g_name);
+        sb_printf(out, "%s", "{\"os\":\"windows\",\"version\":\"" USBEAM_VERSION "\",\"name\":"); sb_jstr(out, g_name);
         sb_add(out, ",", 1); add_local_json(out);
         sb_add(out, ",", 1); client_json(out);
         sb_add(out, ",", 1); nets_json(out);
@@ -630,11 +666,11 @@ static int engine_run(void) {
     _snwprintf(g_data_dir, MAX_PATH, L"%ls\\USBeam", pd);
     CreateDirectoryW(g_data_dir, NULL);
     wchar_t wp[MAX_PATH];
-    _snwprintf(wp, MAX_PATH, L"%ls\\usbeam.log", g_data_dir);
-    g_log = _wfopen(wp, L"a");
+    _snwprintf(g_log_path, MAX_PATH, L"%ls\\usbeam.log", g_data_dir);
+    log_open();
     _snwprintf(wp, MAX_PATH, L"%ls\\settings.txt", g_data_dir);
     WideCharToMultiByte(CP_ACP, 0, wp, -1, g_cfg_path, MAX_PATH, NULL, NULL);
-    logm("======== USBeam service started (version 0.2)");
+    logm("======== USBeam service started (version " USBEAM_VERSION ")");
     wchar_t pf[MAX_PATH];
     if (!GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH)) wcscpy(pf, L"C:\\Program Files");
     _snwprintf(g_usbip_exe, MAX_PATH, L"%ls\\USBip\\usbip.exe", pf);
@@ -681,7 +717,12 @@ static int engine_run(void) {
 
     logm("Stopping: returning devices to this PC and releasing remote devices...");
     for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use) end_session(&g_devs[i]);
-    if (have_usbip()) client_release_all();
+    if (have_usbip()) {
+        client_release_all();
+        usbip_stop_retries();
+        g_natt = usbip_ports(g_att, 64);         // Quit ends every connection, also ones USBeam didn't make
+        for (int k = 0; k < g_natt; k++) usbip_detach(g_att[k].port);
+    }
     Sleep(3000);       // let sessions finish returning devices
     {   // the app shows "starting…" until the service runs again
         wchar_t p[MAX_PATH]; _snwprintf(p, MAX_PATH, L"%ls\\ui-token", g_data_dir); DeleteFileW(p);

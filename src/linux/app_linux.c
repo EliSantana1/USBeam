@@ -11,6 +11,7 @@
 #include <net/if.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include "../common/version.h"
 #include "../common/http.h"
 #include "../common/client_types.h"
 #include "ui_html.h"
@@ -71,18 +72,68 @@ static int plat_local_nets(LocalNet *out, int max) {
     return n;
 }
 static void plat_client_tick_begin(void) {}
+// Each device this PC uses is noted in /run/usbeam/port-N ("ip busid"), so USBeam still knows
+// it after its service restarts. /run is emptied at every power-on, like the virtual ports.
+static void port_note(int port, const char *ip, const char *busid) {
+    char p[64]; snprintf(p, sizeof p, "/run/usbeam/port-%d", port);
+    if (!ip) { unlink(p); return; }
+    mkdir("/run/usbeam", 0755);
+    FILE *f = fopen(p, "w");
+    if (f) { fprintf(f, "%s %s\n", ip, busid); fclose(f); }
+}
 static int plat_attach(const char *ip, const char *busid) {
     Want w; memset(&w, 0, sizeof w);
     snprintf(w.busid, sizeof w.busid, "%s", busid);
     w.port = -1;
-    return attach_one(ip, &w) == 0 ? w.port : -1;
+    if (attach_one(ip, &w) != 0) return -1;
+    port_note(w.port, ip, busid);
+    return w.port;
 }
 static int plat_port_alive(int port, const char *ip, const char *busid) {
     (void)ip; (void)busid;
     int st = port_status(port);
     return st == ST_USED || st == ST_NOTASSIGNED;
 }
-static void plat_detach(int port) { if (plat_port_alive(port, NULL, NULL)) detach_port(port); }
+static void plat_detach(int port) { if (plat_port_alive(port, NULL, NULL)) detach_port(port); port_note(port, NULL, NULL); }
+static void plat_stop_retries(void) {}           // Linux's vhci-hcd never reconnects by itself
+static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) {
+    int n = 0;
+    DIR *d = opendir("/run/usbeam");
+    struct dirent *e;
+    while (d && (e = readdir(d)) && n < max) {
+        int pn;
+        if (sscanf(e->d_name, "port-%d", &pn) != 1) continue;
+        int st = port_status(pn);
+        if (st != ST_USED && st != ST_NOTASSIGNED) { port_note(pn, NULL, NULL); continue; }   // no longer in use
+        char p[300]; snprintf(p, sizeof p, "/run/usbeam/%s", e->d_name);
+        FILE *f = fopen(p, "r");
+        if (f && fscanf(f, "%63s %31s", ip[n], busid[n]) == 2) port[n++] = pn;
+        if (f) fclose(f);
+    }
+    if (d) closedir(d);
+    return n;
+}
+// At start: virtual ports in use that USBeam has no note of were connected by something else
+// earlier (or a crash): disconnect them so nothing is left half-connected.
+static void vhci_cleanup(void) {
+    char path[64], line[256], hub[8], np[64];
+    for (int c = 0; c < 16; c++) {
+        if (c == 0) snprintf(path, sizeof path, VHCI "/status");
+        else snprintf(path, sizeof path, VHCI "/status.%d", c);
+        FILE *f = fopen(path, "r");
+        if (!f) break;
+        int p, sta;
+        if (!fgets(line, sizeof line, f)) { fclose(f); continue; }
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "%7s %d %d", hub, &p, &sta) != 3 || (sta != ST_USED && sta != ST_NOTASSIGNED)) continue;
+            snprintf(np, sizeof np, "/run/usbeam/port-%d", p);
+            if (access(np, F_OK) == 0) continue;
+            logm("Virtual port %d was in use without USBeam knowing: disconnecting it", p);
+            detach_port(p);
+        }
+        fclose(f);
+    }
+}
 static const char *plat_client_note(void) { return NULL; }
 static void plat_tune(void) { tune_drives(); }
 
@@ -183,7 +234,7 @@ static int plat_networks(NetInfo *out, int max) {
         if ((a & 0xFFFF0000u) == 0xA9FE0000u) continue;                 // 169.254.x.x: no network
         NetInfo *x = &out[n++];
         memset(x, 0, sizeof *x);
-        x->net = a & m; x->mask = m; x->kind = NET_HOME;
+        x->net = a & m; x->mask = m; x->kind = NET_HOME; x->ip = a;
         if (!strncmp(i->ifa_name, "zt", 2)) x->kind = NET_ZT;
         else if (!strncmp(i->ifa_name, "tailscale", 9) || (a & 0xFFC00000u) == 0x64400000u) x->kind = NET_TS;
         int bits = 0; for (uint32_t k = m; k; k <<= 1) bits++;
@@ -401,7 +452,8 @@ static void add_local_json(sb_t *j) {
         sb_add(j, "{\"id\":", 6); sb_jstr(j, ids[i]);
         sb_add(j, ",\"name\":", 8); sb_jstr(j, dev_name(ids[i], name, sizeof name));
         sb_printf(j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"fixed\":%s,\"peer\":", attr_hex(ids[i], "idVendor"), attr_hex(ids[i], "idProduct"), st, cd, fixed ? "true" : "false");
-        sb_jstr(j, peer);
+        char pl[160] = ""; if (peer[0]) peer_label(peer, pl, sizeof pl, 0);
+        sb_jstr(j, pl);
         sb_add(j, ",\"note\":", 8); sb_jstr(j, note);
         sb_add(j, "}", 1);
     }
@@ -410,7 +462,7 @@ static void add_local_json(sb_t *j) {
 
 static int ui_api(const char *method, const char *path, const char *body, sb_t *out) {
     if (!strcmp(method, "GET") && !strcmp(path, "/api/state")) {
-        sb_printf(out, "%s", "{\"os\":\"linux\",\"name\":"); sb_jstr(out, g_name);
+        sb_printf(out, "%s", "{\"os\":\"linux\",\"version\":\"" USBEAM_VERSION "\",\"name\":"); sb_jstr(out, g_name);
         sb_printf(out, "%s", ","); add_local_json(out);
         sb_printf(out, "%s", ","); client_json(out);
         sb_printf(out, "%s", ","); nets_json(out);
@@ -641,13 +693,14 @@ static int cmd_app(int service) {
     if (uis < 0) { printf("Cannot use local port %d for the app window. Is USBeam already running?\n", UI_PORT); return 1; }
 
     nets_refresh();          // which networks USBeam may be used on
+    if (!uitest) vhci_cleanup();
     write_token_file();
     g_uitest = uitest;
     pthread_t ct, ht, dt;
     pthread_create(&ct, NULL, client_main, NULL);
     pthread_create(&ht, NULL, host_main, (void *)(intptr_t)ls);
     pthread_create(&dt, NULL, disco_main, (void *)(intptr_t)us);
-    logm("USBeam for Linux started on %s", g_name);
+    logm("USBeam %s for Linux started on %s", USBEAM_VERSION, g_name);
     if (!service) open_window();
 
     // This thread serves the app window only, so nothing else can make the window hang.

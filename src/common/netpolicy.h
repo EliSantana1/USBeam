@@ -18,6 +18,7 @@
 #define MAXNETS 16
 typedef struct {
     uint32_t net, mask;     // host byte order
+    uint32_t ip;            // this PC's own address on it
     int kind;               // NET_HOME / NET_ZT / NET_TS
     int allowed;            // USBeam may be used here
     int pub;                // Windows: marked Public
@@ -97,4 +98,26 @@ static void nets_json(sb_t *j) {
     }
     nets_unlock();
     sb_add(j, "]", 1);
+}
+
+// "Desktop (10.0.0.5)", "this PC (10.0.0.7)" or just the address, for "In use by ...".
+static void peer_label(const char *ip, char *out, size_t n, int cl_held) {
+    char name[64] = "";
+    struct in_addr a;
+    if (!ip || !ip[0]) { snprintf(out, n, "%s", ""); return; }
+    if (inet_pton(AF_INET, ip, &a) == 1) {
+        uint32_t h = ntohl(a.s_addr);
+        nets_lock();
+        for (int i = 0; i < g_nnets; i++) if (g_nets[i].ip == h) snprintf(name, sizeof name, "this PC");
+        nets_unlock();
+    }
+    if (!name[0]) {
+        if (!cl_held) cl_lock();
+        for (int i = 0; i < CL_MAXR && !name[0]; i++)
+            for (int k = 0; k < g_r[i].naddr; k++)
+                if (g_r[i].id[0] && !strcmp(g_r[i].addr[k].ip, ip) && g_r[i].name[0] && strcmp(g_r[i].name, ip)) { snprintf(name, sizeof name, "%s", g_r[i].name); break; }
+        if (!cl_held) cl_unlock();
+    }
+    if (name[0]) snprintf(out, n, "%s (%s)", name, ip);
+    else snprintf(out, n, "%s", ip);
 }

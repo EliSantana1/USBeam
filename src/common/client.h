@@ -22,6 +22,9 @@
 //   void plat_detach(int port);
 //   const char *plat_client_note(void);                    // NULL, or why this PC can't use remote devices
 //   void plat_tune(void);                                  // after attaching (Linux: drive speed)
+//   int  plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max);  // devices this PC uses now
+//   void plat_stop_retries(void);                          // cancel any reconnecting the driver does by itself
+//   void peer_label(const char *ip, char *out, size_t n, int cl_held);       // "Desktop (10.0.0.5)"
 //   void logm(const char *fmt, ...);
 //   char g_id[33];                                         // this PC's USBeam id
 //   char g_boot_id[64];                                    // changes on every real power-on
@@ -226,6 +229,9 @@ static int poll_pc(const char *ip, PollResult *out) {
 
 // ---------------------------------------------------------------- the client loop (once a second)
 static void client_save(void);
+static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max);
+static void plat_stop_retries(void);
+static void peer_label(const char *ip, char *out, size_t n, int cl_held);
 
 static void client_tick(void) {
     unsigned long long now = now_ms();
@@ -268,9 +274,32 @@ static void client_tick(void) {
     cl_lock();
     for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used) any = 1;
     cl_unlock();
-    if (!any || plat_client_note()) return;
+    if (plat_client_note()) return;
+    static unsigned long long next_adopt;
+    int adopt = now >= next_adopt;              // also look for connections USBeam didn't make (every 10 s)
+    if (!any && !adopt) return;
     plat_client_tick_begin();
     int changed = 0;
+    if (adopt) {
+        next_adopt = now + 10000;
+        int ports[CL_MAXW]; char aips[CL_MAXW][64], abus[CL_MAXW][32];
+        int na = plat_attached(ports, aips, abus, CL_MAXW);
+        for (int k = 0; k < na; k++) {
+            cl_lock();
+            int known = 0;
+            for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port == ports[k]) known = 1;
+            Remote *r = known ? NULL : rm_by_ip(aips[k]);
+            Use *u = r ? use_new(r->id, abus[k]) : NULL;
+            if (u && u->port < 0) {
+                u->port = ports[k]; u->want = 1; u->release = 0;
+                snprintf(u->ip, sizeof u->ip, "%s", aips[k]);
+                changed = 1;
+            } else u = NULL;
+            cl_unlock();
+            if (u) logm("[%s] already in use here (from %s, port %d): now shown in USBeam", abus[k], aips[k], ports[k]);
+        }
+        any = 1;
+    }
     for (int i = 0; i < CL_MAXW; i++) {
         cl_lock();
         Use u = g_use[i];
@@ -278,6 +307,7 @@ static void client_tick(void) {
         if (!u.used) continue;
         if (u.release) {
             if (u.port >= 0) plat_detach(u.port);
+            plat_stop_retries();
             logm("[%s] released", u.busid);
             cl_lock(); g_use[i].used = 0; cl_unlock();
             changed = 1;
@@ -286,6 +316,7 @@ static void client_tick(void) {
         if (u.port >= 0) {
             if (plat_port_alive(u.port, u.ip, u.busid)) continue;
             logm("[%s] connection ended", u.busid);
+            plat_stop_retries();                 // only USBeam decides about reconnecting (Auto-reconnect)
             cl_lock();
             g_use[i].port = -1;
             if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
@@ -436,7 +467,8 @@ static void client_json(sb_t *j) {
             sb_add(j, ",\"vid\":", 7); sb_jstr(j, d->vid);
             sb_add(j, ",\"pid\":", 7); sb_jstr(j, d->pid);
             sb_printf(j, ",\"state\":\"%s\",\"countdown\":%d,\"auto\":%s,\"peer\":", st, d->countdown, (u && u->autorc) ? "true" : "false");
-            sb_jstr(j, d->peer);
+            char pl[160]; peer_label(d->peer, pl, sizeof pl, 1);
+            sb_jstr(j, pl);
             sb_add(j, "}", 1);
         }
         for (int k = 0; k < CL_MAXW; k++) {     // devices in use / waiting that the PC doesn't list right now
