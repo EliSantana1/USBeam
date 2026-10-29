@@ -36,6 +36,17 @@ header .wrap { display: flex; align-items: center; gap: 14px; padding-top: 12px;
 .spacer { flex: 1 1 auto; }
 .netpick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 select { padding: 7px 30px 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); min-height: 36px; font-size: 13px; cursor: pointer; }
+/* Drop-down lists are drawn by the page itself (the browser's own pop-up lists misbehave in some
+   Linux desktops, e.g. with 120% display scaling). The real <select> stays hidden underneath. */
+select.native { display: none; }
+.csel { position: relative; display: inline-block; }
+.cselbtn { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 36px; min-width: 120px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--text); text-align: left; }
+.cselbtn svg { flex: none; opacity: .7; }
+.cselbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.csellist { position: fixed; z-index: 60; min-width: 120px; max-height: 260px; overflow: auto; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.25); }
+.csellist button { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 8px 10px; font-size: 13px; cursor: pointer; color: var(--text); white-space: nowrap; }
+.csellist button:hover, .csellist button:focus { background: var(--chip); outline: none; }
+.csellist button[aria-selected="true"] { font-weight: 600; color: var(--accent); }
 .iconbtn { min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--muted); }
 .iconbtn:hover { color: var(--text); }
 
@@ -326,6 +337,74 @@ function toggleMenu(e) {
 }
 document.addEventListener('click', e => { const m = document.getElementById('menu'); if (e.isTrusted && !m.hidden && !m.contains(e.target) && !e.target.closest('#modalbg')) toggleMenu(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); const m = document.getElementById('menu'); if (!m.hidden) toggleMenu(); } });
+// ---- page-drawn drop-down lists (see the CSS note) ----
+let cselOpenId = '';
+function cselSync(sel) {
+  const btn = document.getElementById('csel-' + sel.id);
+  if (!btn) return;
+  const o = sel.options[sel.selectedIndex];
+  btn.querySelector('span').textContent = o ? o.textContent : '';
+}
+function cselClose() {
+  const l = document.getElementById('csellist');
+  if (l) l.remove();
+  if (cselOpenId) document.getElementById('csel-' + cselOpenId)?.setAttribute('aria-expanded', 'false');
+  cselOpenId = '';
+}
+function cselOpen(sel) {
+  const was = cselOpenId;
+  cselClose();
+  if (was === sel.id) return;
+  const btn = document.getElementById('csel-' + sel.id), r = btn.getBoundingClientRect();
+  const l = document.createElement('div');
+  l.id = 'csellist'; l.className = 'csellist'; l.setAttribute('role', 'listbox');
+  [...sel.options].forEach((o, i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = o.textContent; b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', i === sel.selectedIndex ? 'true' : 'false');
+    b.onclick = e => { e.stopPropagation(); cselClose(); btn.focus(); if (sel.value !== o.value) { sel.value = o.value; cselSync(sel); sel.dispatchEvent(new Event('change')); } };
+    l.appendChild(b);
+  });
+  document.body.appendChild(l);
+  l.style.minWidth = r.width + 'px';
+  const below = window.innerHeight - r.bottom - 8;
+  l.style.left = Math.max(8, Math.min(r.left, window.innerWidth - l.offsetWidth - 8)) + 'px';
+  if (below < l.offsetHeight && r.top > below) l.style.top = Math.max(8, r.top - l.offsetHeight - 4) + 'px';
+  else l.style.top = (r.bottom + 4) + 'px';
+  cselOpenId = sel.id;
+  btn.setAttribute('aria-expanded', 'true');
+  (l.querySelector('[aria-selected="true"]') || l.firstChild)?.focus();
+}
+function cselMake(id) {
+  const sel = document.getElementById(id);
+  sel.classList.add('native');
+  const w = document.createElement('span'); w.className = 'csel';
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'cselbtn'; b.id = 'csel-' + id;
+  b.setAttribute('aria-haspopup', 'listbox'); b.setAttribute('aria-expanded', 'false');
+  if (sel.getAttribute('aria-label')) b.setAttribute('aria-label', sel.getAttribute('aria-label'));
+  b.innerHTML = '<span></span><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  b.onclick = e => { e.stopPropagation(); cselOpen(sel); };
+  b.onkeydown = e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (cselOpenId !== id) cselOpen(sel); } };
+  w.appendChild(b);
+  sel.after(w);
+  new MutationObserver(() => cselSync(sel)).observe(sel, { childList: true, subtree: true, attributes: true });
+  cselSync(sel);
+}
+document.addEventListener('click', e => { if (cselOpenId && !e.target.closest('#csellist') && !e.target.closest('#csel-' + cselOpenId)) cselClose(); }, true);
+document.addEventListener('keydown', e => {
+  if (!cselOpenId) return;
+  const l = document.getElementById('csellist'), items = l ? [...l.querySelectorAll('button')] : [];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); const id = cselOpenId; cselClose(); document.getElementById('csel-' + id)?.focus(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); items[Math.min(items.length - 1, i + 1)]?.focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); items[Math.max(0, i - 1)]?.focus(); }
+  else if (e.key === 'Tab') cselClose();
+}, true);
+window.addEventListener('resize', cselClose);
+document.addEventListener('scroll', e => { if (cselOpenId && !e.target.closest?.('#csellist')) cselClose(); }, true);
+['net', 'holdsel', 'themesel'].forEach(cselMake);
+
 let lastPrefs = '';
 function applyPrefs(s) {
   const p = s.prefs || {};
@@ -335,6 +414,7 @@ function applyPrefs(s) {
   const th = p.theme === 'light' || p.theme === 'dark' ? p.theme : sysTheme;
   if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme;
   document.getElementById('themesel').value = p.theme || 'system';
+  cselSync(document.getElementById('themesel'));
   document.getElementById('traychk').checked = p.tray !== false;
   document.getElementById('pcnamehint').textContent = 'The name other PCs see. Leave empty to use the computer\'s name (' + (p.hostname || '') + ').';
   const hs = document.getElementById('holdsel'), opts = [5, 10, 15, 30, 60];
@@ -434,7 +514,7 @@ async function refresh() {
     const hn = document.getElementById('hostnote');
     hn.hidden = !s.host_note; hn.textContent = s.host_note || '';
     const nets = JSON.stringify([s.nets, s.net]);
-    if (nets !== lastNets && document.activeElement?.id !== 'net') {
+    if (nets !== lastNets && cselOpenId !== 'net') {
       lastNets = nets;
       document.getElementById('net').innerHTML = (s.nets || []).map(n => `<option value="${esc(n.key)}" ${n.key === s.net ? 'selected' : ''}>${esc(n.label)}</option>`).join('');
       const label = (s.nets || []).find(n => n.key === s.net)?.label || '';
