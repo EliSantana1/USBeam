@@ -7,6 +7,10 @@
 //
 //   USBeam.exe          open the window (or bring the running one forward)
 //   USBeam.exe --tray   start hidden in the tray (used at sign-in)
+//
+// The page asks this app for things only it can do with links "usbeam-app:<what>?...":
+// open (a project or Windows settings link), update (download, check and run the new installer)
+// and uninstall (run USBeam's uninstaller).
 
 #define _WIN32_WINNT 0x0A00
 #define WINVER 0x0A00
@@ -25,11 +29,13 @@
 #include <stdio.h>
 #include <string>
 #include <functional>
+#include <vector>
 #include "WebView2.h"
 
 #define UI_PORT 3242
 #define WM_TRAY (WM_APP + 1)
 #define WM_SHOW_APP (WM_APP + 2)
+#define WM_REPORT (WM_APP + 3)
 #define TIMER_CHECK 1
 
 static HWND g_hwnd;
@@ -39,6 +45,7 @@ static ICoreWebView2Controller *g_ctl;
 static ICoreWebView2 *g_web;
 static std::string g_token;
 static bool g_webview_failed;
+static bool g_quitting;
 
 // ---------------------------------------------------------------- small COM helper: callback objects
 template <class I, class... Args>
@@ -95,6 +102,25 @@ static void post_action(const char *json) {
     closesocket(s);
 }
 
+// Ask the service for its state (used at sign-in for "Show USBeam in the tray"). "" if not answering.
+static std::string get_state() {
+    std::string tok = read_token(), body;
+    if (tok.empty()) return body;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in a = {};
+    a.sin_family = AF_INET; a.sin_port = htons(UI_PORT); a.sin_addr.s_addr = htonl(0x7F000001);
+    DWORD to = 3000; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof to);
+    if (connect(s, (sockaddr *)&a, sizeof a) == 0) {
+        char req[256];
+        int n = snprintf(req, sizeof req, "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-USBeam-Token: %s\r\nConnection: close\r\n\r\n", UI_PORT, tok.c_str());
+        send(s, req, n, 0);
+        char buf[4096]; int k;
+        while ((k = recv(s, buf, sizeof buf, 0)) > 0) body.append(buf, k);
+    }
+    closesocket(s);
+    return body;
+}
+
 // Start the USBeam service if it isn't running (after Quit, or if it was stopped).
 // The installer lets signed-in users start and stop this one service.
 static void ensure_service() {
@@ -137,6 +163,131 @@ static void navigate_app() {
     g_web->Navigate(url);
 }
 
+// ---------------------------------------------------------------- requests from the page
+// Show how an app task is going in the page (gear menu). Safe from any thread.
+static void report(const std::wstring &text) {
+    PostMessageW(g_hwnd, WM_REPORT, 0, (LPARAM)new std::wstring(text));
+}
+static void report_now(const std::wstring *text) {
+    if (!g_web) return;
+    std::wstring js = L"window.appEvent && window.appEvent({text: \"";
+    for (wchar_t c : *text) { if (c == L'"' || c == L'\\') js += L'\\'; js += c; }
+    js += L"\"})";
+    g_web->ExecuteScript(js.c_str(), nullptr);
+}
+
+static std::wstring url_decode(const std::wstring &v) {
+    std::string bytes;
+    for (size_t i = 0; i < v.size(); i++) {
+        if (v[i] == L'%' && i + 2 < v.size()) { bytes += (char)wcstol(v.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
+        else if (v[i] == L'+') bytes += ' ';
+        else bytes += (char)v[i];
+    }
+    int n = MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), -1, nullptr, 0);
+    std::wstring out(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), -1, &out[0], n);
+    return out;
+}
+static std::wstring param(const std::wstring &uri, const wchar_t *key) {
+    size_t q = uri.find(L'?');
+    if (q == std::wstring::npos) return L"";
+    std::wstring rest = uri.substr(q + 1), k = std::wstring(key) + L"=";
+    size_t pos = 0;
+    while (pos <= rest.size()) {
+        size_t amp = rest.find(L'&', pos);
+        std::wstring part = rest.substr(pos, amp == std::wstring::npos ? std::wstring::npos : amp - pos);
+        if (part.compare(0, k.size(), k) == 0) return url_decode(part.substr(k.size()));
+        if (amp == std::wstring::npos) break;
+        pos = amp + 1;
+    }
+    return L"";
+}
+
+static const wchar_t *PROJECT = L"https://github.com/EliSantana1/USBeam";
+static const wchar_t *DOWNLOADS = L"https://github.com/EliSantana1/USBeam/releases/download/";
+
+// SHA-256 of a file as lowercase hex ("" on error). bcrypt.dll is loaded on demand.
+static std::wstring sha256_file(const std::wstring &path) {
+    typedef LONG (WINAPI *BOpen_t)(void **, LPCWSTR, LPCWSTR, ULONG);
+    typedef LONG (WINAPI *BHash_t)(void *, PUCHAR, ULONG, PUCHAR, ULONG, PUCHAR, ULONG);
+    typedef LONG (WINAPI *BClose_t)(void *, ULONG);
+    HMODULE b = LoadLibraryW(L"bcrypt.dll");
+    BOpen_t bopen = b ? (BOpen_t)(void *)GetProcAddress(b, "BCryptOpenAlgorithmProvider") : nullptr;
+    BHash_t bhash = b ? (BHash_t)(void *)GetProcAddress(b, "BCryptHash") : nullptr;
+    BClose_t bclose = b ? (BClose_t)(void *)GetProcAddress(b, "BCryptCloseAlgorithmProvider") : nullptr;
+    if (!bopen || !bhash || !bclose) return L"";
+    FILE *f = _wfopen(path.c_str(), L"rb");
+    if (!f) return L"";
+    std::vector<unsigned char> data;
+    unsigned char buf[65536]; size_t k;
+    while ((k = fread(buf, 1, sizeof buf, f)) > 0) data.insert(data.end(), buf, buf + k);
+    fclose(f);
+    void *alg = nullptr; unsigned char h[32];
+    if (bopen(&alg, L"SHA256", nullptr, 0) != 0) return L"";
+    LONG st = bhash(alg, nullptr, 0, data.empty() ? nullptr : data.data(), (ULONG)data.size(), h, 32);
+    bclose(alg, 0);
+    if (st != 0) return L"";
+    wchar_t hex[65];
+    for (int i = 0; i < 32; i++) swprintf(hex + i * 2, 3, L"%02x", h[i]);
+    return hex;
+}
+
+struct UpdateJob { std::wstring url, sha, ver; };
+static DWORD WINAPI update_thread(LPVOID arg) {
+    UpdateJob *j = (UpdateJob *)arg;
+    typedef HRESULT (WINAPI *Dl_t)(LPUNKNOWN, LPCWSTR, LPCWSTR, DWORD, void *);
+    HMODULE u = LoadLibraryW(L"urlmon.dll");
+    Dl_t dl = u ? (Dl_t)(void *)GetProcAddress(u, "URLDownloadToFileW") : nullptr;
+    wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+    std::wstring file = std::wstring(tmp) + L"USBeam-Setup-" + j->ver + L".exe";
+    report(L"Downloading USBeam " + j->ver + L"…");
+    if (!dl || FAILED(dl(nullptr, j->url.c_str(), file.c_str(), 0, nullptr))) { report(L"The download failed. Is this PC online?"); delete j; return 0; }
+    if (!j->sha.empty()) {
+        std::wstring got = sha256_file(file);
+        for (auto &c : j->sha) c = towlower(c);
+        if (got != j->sha) { DeleteFileW(file.c_str()); report(L"The download was damaged (its fingerprint doesn't match). Nothing was changed."); delete j; return 0; }
+    }
+    report(L"Installing… Windows will ask for permission.");
+    SHELLEXECUTEINFOW se = { sizeof se };
+    se.fMask = SEE_MASK_NOASYNC;
+    se.lpVerb = L"runas";
+    se.lpFile = file.c_str();
+    se.lpParameters = L"/SILENT /SUPPRESSMSGBOXES /NORESTART";
+    se.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&se)) report(L"The update was cancelled.");
+    delete j;            // the installer closes this app, updates USBeam and opens it again
+    return 0;
+}
+
+static void app_link(const std::wstring &uri) {
+    std::wstring what = uri.substr(11);                 // after "usbeam-app:"
+    what = what.substr(0, what.find(L'?'));
+    if (what == L"open") {
+        std::wstring url = param(uri, L"url");
+        if (url.compare(0, wcslen(PROJECT), PROJECT) == 0 || url.compare(0, 19, L"ms-settings:network") == 0)
+            ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    } else if (what == L"update") {
+        UpdateJob *j = new UpdateJob{ param(uri, L"url"), param(uri, L"sha256"), param(uri, L"version") };
+        if (j->url.compare(0, wcslen(DOWNLOADS), DOWNLOADS) != 0 || j->ver.empty() || j->url.find(L"..") != std::wstring::npos ||
+            j->url.find_first_of(L"\\%?#") != std::wstring::npos || j->url.size() < 5 || j->url.compare(j->url.size() - 4, 4, L".exe") != 0) { delete j; report(L"This update can't be installed from here."); return; }
+        for (wchar_t c : j->ver) if (!iswdigit(c) && c != L'.') { delete j; return; }
+        CloseHandle(CreateThread(nullptr, 0, update_thread, j, 0, nullptr));
+    } else if (what == L"uninstall") {
+        wchar_t dir[MAX_PATH];
+        GetModuleFileNameW(nullptr, dir, MAX_PATH);
+        wchar_t *sl = wcsrchr(dir, L'\\'); if (sl) *sl = 0;
+        std::wstring unins = std::wstring(dir) + L"\\unins000.exe";
+        SHELLEXECUTEINFOW se = { sizeof se };
+        se.lpVerb = L"runas";
+        se.lpFile = unins.c_str();
+        se.lpParameters = L"/SILENT";
+        se.nShow = SW_SHOWNORMAL;
+        report(L"Uninstalling… Windows will ask for permission.");
+        if (!ShellExecuteExW(&se)) report(L"Uninstall was cancelled.");
+        else g_quitting = true;          // the uninstaller closes this app
+    }
+}
+
 // ---------------------------------------------------------------- WebView2
 typedef HRESULT (STDAPICALLTYPE *CreateEnv_t)(PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions *, ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *);
 
@@ -174,6 +325,18 @@ static void start_webview() {
                         st->put_AreDefaultScriptDialogsEnabled(TRUE);
                         st->Release();
                     }
+                    EventRegistrationToken tok;
+                    g_web->add_NavigationStarting(
+                        new Callback<ICoreWebView2NavigationStartingEventHandler, ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *>(
+                        [](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *a) -> HRESULT {
+                            LPWSTR uri = nullptr;
+                            if (SUCCEEDED(a->get_Uri(&uri)) && uri) {
+                                std::wstring u(uri);
+                                CoTaskMemFree(uri);
+                                if (u.compare(0, 11, L"usbeam-app:") == 0) { a->put_Cancel(TRUE); app_link(u); }
+                            }
+                            return S_OK;
+                        }), &tok);
                     RECT rc; GetClientRect(g_hwnd, &rc);
                     g_ctl->put_Bounds(rc);
                     navigate_app();
@@ -235,8 +398,17 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         apply_title_bar_theme();
         break;
     case WM_TIMER:
-        if (wp == TIMER_CHECK && g_web && IsWindowVisible(h) && g_token != read_token()) navigate_app();   // service restarted
+        if (wp == TIMER_CHECK) {
+            if (!g_quitting) ensure_service();            // keep the service running (after Restart, or a crash)
+            if (g_web && IsWindowVisible(h) && g_token != read_token()) navigate_app();   // service restarted
+        }
         return 0;
+    case WM_REPORT: {
+        std::wstring *t = (std::wstring *)lp;
+        report_now(t);
+        delete t;
+        return 0;
+    }
     case WM_TRAY:
         if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT) show_window();
         else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
@@ -253,6 +425,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             else if (cmd == 2) {
                 // Quit = stop everything: the service ends all connections, returns shared
                 // devices to this PC and releases devices used from other PCs. Then close.
+                g_quitting = true;
                 ShowWindow(h, SW_HIDE);
                 post_action("{\"op\":\"quit\"}");
                 DestroyWindow(h);
@@ -313,6 +486,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int show) {
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     tray_add();
     ensure_service();
+    if (tray_only) {
+        // At sign-in: only stay if "Show USBeam in the tray when I sign in" is on.
+        std::string st;
+        for (int i = 0; i < 15 && (st = get_state()).empty(); i++) Sleep(2000);    // the service may still be starting
+        if (st.find("\"tray\":false}") != std::string::npos) { Shell_NotifyIconW(NIM_DELETE, &g_nid); return 0; }
+    }
     start_webview();
     SetTimer(g_hwnd, TIMER_CHECK, 3000, nullptr);
     if (!tray_only) show_window();

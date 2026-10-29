@@ -11,6 +11,7 @@
 #include <net/if.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <sys/utsname.h>
 #include "../common/version.h"
 #include "../common/http.h"
 #include "../common/client_types.h"
@@ -134,7 +135,10 @@ static void vhci_cleanup(void) {
         fclose(f);
     }
 }
-static const char *plat_client_note(void) { return NULL; }
+// USB/IP kernel drivers: built into most distributions, a separate package on some (e.g. Ubuntu).
+static int g_have_stub = 1, g_have_vhci = 1;
+static char g_driver_note[256];
+static const char *plat_client_note(void) { return g_have_vhci ? NULL : g_driver_note; }
 static void plat_tune(void) { tune_drives(); }
 
 #include "../common/client.h"
@@ -407,11 +411,11 @@ static void disco_receive(int us) {
 
 // Firewall (ufw, when it is switched on): open USBeam's ports only for the networks USBeam
 // may be used on, and remove rules USBeam added earlier for other networks.
-static void firewall_sync(void) {
-    if (system("command -v ufw >/dev/null 2>&1 && timeout 20 ufw status 2>/dev/null | grep -q 'Status: active'") != 0) return;
-    char want[MAXNETS][40]; int nw = 0;
+// The networks USBeam may be used on, as firewall address ranges ("192.168.1.0/24", "100.64.0.0/10").
+static int allowed_ranges(char want[][40], int max) {
+    int nw = 0;
     nets_lock();
-    for (int i = 0; i < g_nnets && nw < MAXNETS; i++) {
+    for (int i = 0; i < g_nnets && nw < max; i++) {
         NetInfo *x = &g_nets[i];
         if (!x->allowed) continue;
         int bits = 0; for (uint32_t m = x->mask; m; m <<= 1) bits++;
@@ -422,8 +426,13 @@ static void firewall_sync(void) {
         if (!dup) snprintf(want[nw++], 40, "%s", r);
     }
     nets_unlock();
+    return nw;
+}
+
+// ufw (Ubuntu, Mint, Arch...): rules carry the comment "USBeam".
+static void ufw_sync(char want[][40], int nw) {
+    if (system("command -v ufw >/dev/null 2>&1 && timeout 20 ufw status 2>/dev/null | grep -q 'Status: active'") != 0) return;
     char cmd[256];
-    // Remove USBeam's rules for networks that are no longer allowed.
     FILE *p = popen("timeout 20 ufw status 2>/dev/null", "r");
     char line[512], have[64][40]; int nh = 0;
     while (p && fgets(line, sizeof line, p) && nh < 64) {
@@ -431,10 +440,10 @@ static void firewall_sync(void) {
         char t1[64], t2[64], t3[64], t4[64];
         int k = sscanf(line, "%63s %63s %63s %63s", t1, t2, t3, t4);
         const char *from = (k >= 4 && !strcmp(t3, "IN")) ? t4 : t3;
-        if (k >= 3 && strchr(from, '.')) snprintf(have[nh++], 40, "%s", from);
+        if (k >= 3 && strchr(from, '.') && strlen(from) < 40) snprintf(have[nh++], 40, "%s", from);
     }
     if (p) pclose(p);
-    for (int h = 0; h < nh; h++) {
+    for (int h = 0; h < nh; h++) {             // remove rules for networks that are no longer allowed
         int keep = 0;
         for (int k = 0; k < nw; k++) if (!strcmp(have[h], want[k])) keep = 1;
         if (keep) continue;
@@ -450,6 +459,58 @@ static void firewall_sync(void) {
         if (system(cmd) != 0) logm("Could not add firewall rule for %s", want[k]);
     }
     logm("Firewall (ufw): USBeam allowed on %d network(s)", nw);
+}
+
+// firewalld (Fedora, openSUSE, RHEL...): the ranges USBeam opened are noted in /var/lib/usbeam/firewalld.
+#define FWD_LIST "/var/lib/usbeam/firewalld"
+static void firewalld_rule(const char *range, int add) {
+    static const char *ports[2][2] = { { "3240", "tcp" }, { "3241", "udp" } };
+    for (int k = 0; k < 2; k++) for (int perm = 0; perm < 2; perm++) {
+        char cmd[384];
+        snprintf(cmd, sizeof cmd, "timeout 20 firewall-cmd -q %s--%s-rich-rule='rule family=\"ipv4\" source address=\"%s\" port port=\"%s\" protocol=\"%s\" accept' >/dev/null 2>&1",
+                 perm ? "--permanent " : "", add ? "add" : "remove", range, ports[k][0], ports[k][1]);
+        if (system(cmd) != 0 && add) logm("Could not %s firewall rule for %s", add ? "add" : "remove", range);
+    }
+}
+static void firewalld_sync(char want[][40], int nw) {
+    if (system("command -v firewall-cmd >/dev/null 2>&1 && timeout 20 firewall-cmd --state >/dev/null 2>&1") != 0) return;
+    char have[64][40]; int nh = 0;
+    FILE *f = fopen(FWD_LIST, "r");
+    while (f && nh < 64 && fscanf(f, "%39s", have[nh]) == 1) nh++;
+    if (f) fclose(f);
+    for (int h = 0; h < nh; h++) {
+        int keep = 0;
+        for (int k = 0; k < nw; k++) if (!strcmp(have[h], want[k])) keep = 1;
+        if (!keep) firewalld_rule(have[h], 0);
+    }
+    for (int k = 0; k < nw; k++) {
+        int had = 0;
+        for (int h = 0; h < nh; h++) if (!strcmp(have[h], want[k])) had = 1;
+        if (!had) firewalld_rule(want[k], 1);
+    }
+    mkdir("/var/lib/usbeam", 0755);
+    if (nw) { f = fopen(FWD_LIST, "w"); for (int k = 0; f && k < nw; k++) fprintf(f, "%s\n", want[k]); if (f) fclose(f); }
+    else unlink(FWD_LIST);
+    logm("Firewall (firewalld): USBeam allowed on %d network(s)", nw);
+}
+
+// Open USBeam's ports only for the networks it may be used on; close them for the others.
+static void firewall_sync(void) {
+    char want[MAXNETS][40];
+    int nw = allowed_ranges(want, MAXNETS);
+    ufw_sync(want, nw);
+    firewalld_sync(want, nw);
+}
+
+// "usbeam --cleanup": undo what the service set up on this PC (used when uninstalling).
+static int cmd_cleanup(void) {
+    if (geteuid() != 0) { printf("Needs admin rights.\n"); return 1; }
+    char none[1][40];
+    ufw_sync(none, 0);
+    firewalld_sync(none, 0);
+    system("rm -rf /var/lib/usbeam /run/usbeam");
+    printf("USBeam's firewall rules and data were removed.\n");
+    return 0;
 }
 
 // ---------------------------------------------------------------- app window API
@@ -476,6 +537,36 @@ static void add_local_json(sb_t *j) {
     sb_add(j, "]", 1);
 }
 
+static volatile sig_atomic_t g_restart;     // "Restart USBeam" from the gear menu
+static int ui_api(const char *method, const char *path, const char *body, sb_t *out);
+
+// "Save diagnostics": everything useful for finding a problem, as one text (the app saves it as a file).
+static void diagnostics(sb_t *out) {
+    sb_t t = {0};
+    time_t now = time(NULL); struct tm tmv; localtime_r(&now, &tmv);
+    struct utsname un; uname(&un);
+    char osname[128] = "Linux";
+    FILE *f = fopen("/etc/os-release", "r");
+    char line[256];
+    while (f && fgets(line, sizeof line, f)) if (!strncmp(line, "PRETTY_NAME=", 12)) { snprintf(osname, sizeof osname, "%s", line + 12 + (line[12] == '"')); osname[strcspn(osname, "\"\r\n")] = 0; }
+    if (f) fclose(f);
+    sb_printf(&t, "USBeam %s diagnostics, %04d-%02d-%02d %02d:%02d\n%s, kernel %s (%s)\nThis PC: %s (id %s)\n"
+                  "Drivers: usbip-host %s, vhci-hcd %s\nInstalled as: %s\n\nState:\n",
+              USBEAM_VERSION, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, osname, un.release, un.machine,
+              g_name, g_id, g_have_stub ? "ok" : "missing", g_have_vhci ? "ok" : "missing",
+              access("/opt/usbeam/installed", F_OK) == 0 ? "AppImage" : "package");
+    ui_api("GET", "/api/state", "", &t);
+    sb_printf(&t, "%s", "\n\nLog (most recent last):\n");
+    FILE *p = popen("timeout 10 journalctl -u usbeam --no-pager -n 400 -o short-iso 2>/dev/null", "r");
+    char buf[4096]; size_t k;
+    while (p && (k = fread(buf, 1, sizeof buf, p)) > 0) sb_add(&t, buf, k);
+    if (p) pclose(p);
+    sb_add(out, "{\"ok\":true,\"text\":", 18);
+    sb_jstr(out, t.p ? t.p : "");
+    sb_add(out, "}", 1);
+    sb_free(&t);
+}
+
 static int ui_api(const char *method, const char *path, const char *body, sb_t *out) {
     if (!strcmp(method, "GET") && !strcmp(path, "/api/state")) {
         sb_printf(out, "%s", "{\"os\":\"linux\",\"version\":\"" USBEAM_VERSION "\",\"name\":"); sb_jstr(out, g_name);
@@ -493,7 +584,12 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
             sb_add(out, "}", 1);
         }
         pthread_mutex_unlock(&g_trust_mx);
-        sb_printf(out, "%s", "]}");
+        sb_printf(out, "%s", "],"); prefs_json(out);
+        struct utsname un; uname(&un);
+        sb_add(out, ",\"arch\":", 8); sb_jstr(out, un.machine);
+        sb_printf(out, ",\"install\":\"%s\"", access("/opt/usbeam/installed", F_OK) == 0 ? "appimage" : "package");
+        sb_add(out, ",\"host_note\":", 13); sb_jstr(out, g_have_stub ? "" : g_driver_note);
+        sb_printf(out, "%s", "}");
         return 200;
     }
     if (strcmp(method, "POST") || strcmp(path, "/api/action")) return 404;
@@ -520,6 +616,17 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     }
     else if (!strcmp(op, "net_later")) { if (nid[0]) nets_later(nid); }
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); g_stop = 1; }
+    else if (!strcmp(op, "restart")) { logm("Restart requested from the USBeam app"); g_restart = 1; g_stop = 1; }
+    else if (!strcmp(op, "diagnostics")) { diagnostics(out); return 200; }
+    else if (!strcmp(op, "reset")) {
+        for (int i = 0; i < MAXHIDE; i++) { g_hidden[i][0] = 0; g_shared[i][0] = 0; }
+        for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && !g_h[i].exported) { g_h[i].blocked = 0; g_h[i].hold_until = 0; }
+        pthread_mutex_lock(&g_trust_mx); memset(g_trust_id, 0, sizeof g_trust_id); pthread_mutex_unlock(&g_trust_mx);
+        nets_lock(); memset(g_nets_later, 0, sizeof g_nets_later); nets_unlock();
+        int c2 = 200; client_action("reset_client", body, out, &c2);
+        nets_refresh();
+        logm("USBeam was reset to its starting settings");
+    }
     else if (!strcmp(op, "local_cancel")) { if (h && h->hold_until) { h->hold_until = 0; h->blocked = 1; logm("[%s] reconnect cancelled", id); } }
     else if (!strcmp(op, "local_allow")) { if (h) { h->blocked = 0; h->hold_until = 0; } }
     else if (!strcmp(op, "local_hide")) { set_hidden(id, 1); set_shared(id, 0); save_settings(); }
@@ -581,18 +688,21 @@ static void open_window(void) {
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
 }
 
-// The secret key for the app window, readable by root and the "wheel" group
-// (administrators, which on Arch includes the desktop user).
+// The secret key for the app window, readable by root and the administrators' group.
 static void write_token_file(void) {
     mkdir("/run/usbeam", 0755);
     int fd = open("/run/usbeam/ui-token.new", O_WRONLY | O_CREAT | O_TRUNC, 0640);
     if (fd < 0) { logm("Could not write the app key: %s", strerror(errno)); return; }
     if (write(fd, g_ui_token, strlen(g_ui_token)) < 0) logm("Could not write the app key");
-    gid_t gid = 0;                         // look up "wheel" in /etc/group (no NSS needed)
-    FILE *gf = fopen("/etc/group", "r");
-    char gl[1024];
-    while (gf && fgets(gl, sizeof gl, gf)) { unsigned g; if (sscanf(gl, "wheel:%*[^:]:%u:", &g) == 1) { gid = (gid_t)g; break; } }
-    if (gf) fclose(gf);
+    // Administrators: the "wheel" group (Arch, Fedora, openSUSE...), "sudo" (Debian, Ubuntu, Mint...) or "admin".
+    gid_t gid = 0;
+    const char *groups[] = { "wheel", "sudo", "admin" };
+    for (int gi = 0; gi < 3 && !gid; gi++) {
+        FILE *gf = fopen("/etc/group", "r");
+        char gl[1024], pre[16]; snprintf(pre, sizeof pre, "%s:", groups[gi]);
+        while (gf && fgets(gl, sizeof gl, gf)) { unsigned g; if (!strncmp(gl, pre, strlen(pre)) && sscanf(gl + strlen(pre), "%*[^:]:%u:", &g) == 1) { gid = (gid_t)g; break; } }
+        if (gf) fclose(gf);
+    }
     if (fchown(fd, 0, gid)) logm("Could not set the app key's group");
     close(fd);
     rename("/run/usbeam/ui-token.new", "/run/usbeam/ui-token");
@@ -677,10 +787,22 @@ static int cmd_app(int service) {
     if (geteuid() != 0) { printf("USBeam's service needs admin rights (it is normally started by systemd).\n"); return 1; }
     struct stat st;
     int uitest = getenv("USBEAM_UITEST") != NULL;     // developer test: run without USB drivers
-    if (!uitest && stat(STUB, &st) != 0 && (system("modprobe usbip-host") != 0 || stat(STUB, &st) != 0)) { printf("Could not load the usbip-host kernel driver.\n"); return 1; }
-    if (!uitest && port_status(0) < 0 && (system("modprobe vhci-hcd") != 0 || port_status(0) < 0)) { printf("Could not load the vhci-hcd kernel driver.\n"); return 1; }
+    if (!uitest) {
+        // Missing drivers don't stop USBeam: it runs and the window explains what to install.
+        if (stat(STUB, &st) != 0 && (system("modprobe usbip-host 2>/dev/null") != 0 || stat(STUB, &st) != 0)) g_have_stub = 0;
+        if (port_status(0) < 0 && (system("modprobe vhci-hcd 2>/dev/null") != 0 || port_status(0) < 0)) g_have_vhci = 0;
+        if (!g_have_stub || !g_have_vhci) {
+            struct utsname un; uname(&un);
+            snprintf(g_driver_note, sizeof g_driver_note,
+                     "Linux's USB/IP drivers are missing, so this PC can't %s. Install your distribution's extra kernel modules "
+                     "(on Ubuntu: linux-modules-extra-%s), then restart the PC.",
+                     !g_have_stub && !g_have_vhci ? "share or use devices" : !g_have_stub ? "share its devices" : "use devices from other PCs", un.release);
+            logm("%s", g_driver_note);
+        }
+    }
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
     gethostname(g_name, sizeof g_name);
+    prefs_init();
     FILE *bf = fopen("/proc/sys/kernel/random/boot_id", "r");     // changes on every power-on, not on sleep
     if (bf) { if (!fgets(g_boot_id, sizeof g_boot_id, bf)) g_boot_id[0] = 0; fclose(bf); g_boot_id[strcspn(g_boot_id, "\n")] = 0; }
     load_settings();
@@ -743,5 +865,6 @@ static int cmd_app(int service) {
     pthread_join(ct, NULL);
     client_release_all();
     unlink("/run/usbeam/ui-token");
+    if (g_restart) { logm("Restarting..."); return 3; }    // systemd starts the service again (Restart=on-failure)
     return 0;
 }

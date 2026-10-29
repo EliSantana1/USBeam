@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.2.8"
+#define AppVersion "0.3.0"
 
 [Setup]
 AppId={{6D2C1B54-7E7A-4F1B-9B5D-3E1F0A9C5B21}
@@ -14,6 +14,8 @@ AppPublisherURL=https://github.com/EliSantana1/USBeam
 DefaultDirName={autopf}\USBeam
 DefaultGroupName=USBeam
 DisableProgramGroupPage=yes
+; Always let people choose where to install (another drive, for example).
+DisableDirPage=no
 LicenseFile=..\..\LICENSE
 OutputDir=..\..\build
 OutputBaseFilename=USBeam-Setup-{#AppVersion}
@@ -49,10 +51,14 @@ Filename: "{sys}\sc.exe"; Parameters: "create USBeam binPath= ""{app}\usbeam-ser
 Filename: "{sys}\sc.exe"; Parameters: "config USBeam binPath= ""{app}\usbeam-service.exe"" start= auto"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "description USBeam ""Shares and connects USB devices between your computers."""; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "failure USBeam reset= 86400 actions= restart/3000/restart/3000/restart/10000"; Flags: runhidden waituntilterminated
+; "Restart USBeam" in the app ends the service with an error code: Windows then starts it again.
+Filename: "{sys}\sc.exe"; Parameters: "failureflag USBeam 1"; Flags: runhidden waituntilterminated
 ; Signed-in users may start/stop this one service (the app's Quit and restart), nothing else.
 Filename: "{sys}\sc.exe"; Parameters: "sdset USBeam D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;IU)"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "start USBeam"; Flags: runhidden waituntilterminated
 Filename: "{app}\USBeam.exe"; Description: "Open USBeam now"; Flags: postinstall nowait skipifsilent runasoriginaluser
+; Updates from inside the app run this installer silently: reopen the app afterwards.
+Filename: "{app}\USBeam.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /im USBeam.exe"; Flags: runhidden waituntilterminated; RunOnceId: "KillApp"
@@ -60,9 +66,12 @@ Filename: "{sys}\sc.exe"; Parameters: "stop USBeam"; Flags: runhidden waituntilt
 Filename: "{sys}\timeout.exe"; Parameters: "/t 5 /nobreak"; Flags: runhidden waituntilterminated; RunOnceId: "WaitSvc"
 Filename: "{sys}\sc.exe"; Parameters: "delete USBeam"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteSvc"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""USBeam"""; Flags: runhidden waituntilterminated; RunOnceId: "DelFw"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""USBeam (ZeroTier/Tailscale)"""; Flags: runhidden waituntilterminated; RunOnceId: "DelFwVpn"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{commonappdata}\USBeam"
+; The app window's own data for the person uninstalling.
+Type: filesandordirs; Name: "{localappdata}\USBeam"
 
 [Code]
 // Stop the running service and app before replacing their files (upgrades).

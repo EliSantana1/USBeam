@@ -28,6 +28,8 @@
 //   void logm(const char *fmt, ...);
 //   char g_id[33];                                         // this PC's USBeam id
 //   char g_boot_id[64];                                    // changes on every real power-on
+//   char g_name[64];                                       // the name other PCs see
+//   int  g_hold_secs;                                      // countdown before a replugged device may be taken again
 
 #ifndef USBEAM_CLIENT_H
 #define USBEAM_CLIENT_H
@@ -443,8 +445,31 @@ static int disco_received(const char *msg, const char *ip) {
 // ---------------------------------------------------------------- settings lines
 // Auto-reconnect choices survive sleep, hibernate and USBeam restarts, but not a
 // shutdown or restart of the PC: each is saved with the current boot id.
+// ---------------------------------------------------------------- settings from the gear menu
+static char g_hostname[64];       // the computer's own name (used when no name is set)
+static char g_custom_name[64];    // "Rename this PC" ("" = use the computer's name)
+static char g_theme[8] = "system";
+static int g_tray_login = 1;      // show the tray icon at sign-in
+static void prefs_apply_name(void) {
+    snprintf(g_name, sizeof g_name, "%s", g_custom_name[0] ? g_custom_name : g_hostname);
+}
+static void prefs_init(void) {     // call once after the computer's name is known, before loading settings
+    snprintf(g_hostname, sizeof g_hostname, "%s", g_name);
+}
+static void prefs_json(sb_t *j) {
+    sb_add(j, "\"prefs\":{\"name\":", 16); sb_jstr(j, g_custom_name);
+    sb_add(j, ",\"hostname\":", 12); sb_jstr(j, g_hostname);
+    sb_printf(j, ",\"hold\":%d,\"theme\":\"%s\",\"tray\":%s}", g_hold_secs, g_theme, g_tray_login ? "true" : "false");
+}
+static void prefs_reset(void) {
+    g_custom_name[0] = 0; prefs_apply_name();
+    g_hold_secs = 10; snprintf(g_theme, sizeof g_theme, "system"); g_tray_login = 1;
+}
+
 static void client_save_lines(FILE *f) {
     fprintf(f, "net %s\n", NET_KEY[g_netpref]);
+    if (g_custom_name[0]) fprintf(f, "pcname\t%s\n", g_custom_name);
+    fprintf(f, "hold %d\ntheme %s\ntraylogin %d\n", g_hold_secs, g_theme, g_tray_login);
     for (int i = 0; i < CL_MAXR; i++)
         if (g_r[i].id[0] && g_r[i].manual) for (int k = 0; k < g_r[i].naddr; k++) fprintf(f, "pc %s\n", g_r[i].addr[k].ip);
     for (int i = 0; i < CL_MAXW; i++)
@@ -481,6 +506,19 @@ static int client_load_line(const char *line) {
                 for (char *ip = strtok(ipl, ","); ip; ip = strtok(NULL, ",")) if (ip_u32(ip)) rm_add_addr(r, ip);
             }
         }
+        return 1;
+    }
+    if (!strncmp(line, "pcname\t", 7)) {
+        snprintf(g_custom_name, sizeof g_custom_name, "%s", line + 7);
+        g_custom_name[strcspn(g_custom_name, "\r\n")] = 0;
+        prefs_apply_name();
+        return 1;
+    }
+    int n;
+    if (sscanf(line, "hold %d", &n) == 1) { if (n >= 3 && n <= 120) g_hold_secs = n; return 1; }
+    if (sscanf(line, "traylogin %d", &n) == 1) { g_tray_login = n != 0; return 1; }
+    if (sscanf(line, "theme %7s", a) == 1) {
+        if (!strcmp(a, "light") || !strcmp(a, "dark") || !strcmp(a, "system")) snprintf(g_theme, sizeof g_theme, "%s", a);
         return 1;
     }
     int w = 0;
@@ -579,11 +617,52 @@ static void client_json(sb_t *j) {
 
 // Returns 1 if it handled the action (writes any error into out and sets *code).
 static int client_action(const char *op, const char *body, sb_t *out, int *code) {
-    char pc[64], busid[64], host[64], val[32];
+    char pc[64], busid[64], host[64], val[96];
     json_str(body, "pc", pc, sizeof pc);
     json_str(body, "busid", busid, sizeof busid);
     json_str(body, "host", host, sizeof host);
     json_str(body, "value", val, sizeof val);
+    if (!strcmp(op, "set_name")) {             // "Rename this PC": letters, digits, spaces and - _ . ' ( ), up to 40
+        char clean[64] = ""; size_t k = 0;
+        for (const char *c = val; *c && k < 40; c++) {
+            unsigned char ch = (unsigned char)*c;
+            if (ch >= 0x80 || isalnum(ch) || strchr(" -_.'()", ch)) clean[k++] = (char)ch;
+        }
+        clean[k] = 0;
+        while (k && clean[k - 1] == ' ') clean[--k] = 0;
+        char *st = clean; while (*st == ' ') st++;
+        cl_lock();
+        snprintf(g_custom_name, sizeof g_custom_name, "%s", strcmp(st, g_hostname) ? st : "");
+        prefs_apply_name();
+        cl_unlock();
+        logm("This PC is now called %s", g_name);
+        client_save();
+        return 1;
+    }
+    if (!strcmp(op, "set_hold")) {
+        int n = atoi(val);
+        if (n < 3 || n > 120) { sb_printf(out, "%s", "{\"error\":\"Choose between 3 and 120 seconds.\"}"); *code = 400; return 1; }
+        g_hold_secs = n; client_save(); return 1;
+    }
+    if (!strcmp(op, "set_theme")) {
+        if (strcmp(val, "light") && strcmp(val, "dark") && strcmp(val, "system")) { *code = 400; sb_printf(out, "%s", "{\"error\":\"unknown theme\"}"); return 1; }
+        snprintf(g_theme, sizeof g_theme, "%s", val); client_save(); return 1;
+    }
+    if (!strcmp(op, "set_tray")) { g_tray_login = json_bool(body, "on"); client_save(); return 1; }
+    if (!strcmp(op, "reset_client")) {         // part of "Reset USBeam": let go of everything, forget PCs and settings
+        cl_lock();
+        for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used) { g_use[i].release = 1; g_use[i].autorc = 0; g_use[i].want = 0; }
+        for (int i = 0; i < CL_MAXR; i++) {
+            int busy = 0;
+            for (int k = 0; k < CL_MAXW; k++) if (g_use[k].used && !strcmp(g_use[k].pc, g_r[i].id)) busy = 1;
+            if (!busy) g_r[i].id[0] = 0;
+        }
+        g_netpref = NET_AUTO;
+        prefs_reset();
+        cl_unlock();
+        client_save();
+        return 1;
+    }
     if (!strcmp(op, "set_net")) {
         for (int i = 0; i < 4; i++) if (!strcmp(val, NET_KEY[i])) g_netpref = i;
         cl_lock();

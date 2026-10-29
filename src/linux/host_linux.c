@@ -38,6 +38,7 @@ typedef struct {
 } HostDev;
 
 static HostDev g_h[MAXH];
+static int g_hold_secs = 10;     // countdown before a replugged device may be taken again (gear menu)
 
 static HostDev *hdev(const char *busid, int create) {
     for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && !strcmp(g_h[i].busid, busid)) return &g_h[i];
@@ -456,9 +457,9 @@ static void host_tick(void) {
         if (h->returning && dev_present(h->busid)) {
             h->returning = 0;
             if (bound_to_stub(h->busid)) return_to_host(h->busid);
-            h->hold_until = now + 10; h->last_shown = 0;
-            logm("[%s] %s plugged back in and works on this PC. Clients may take it again in 10 s. Type C %s to cancel.",
-                 h->busid, dev_name(h->busid, name, sizeof name), h->busid);
+            h->hold_until = now + g_hold_secs; h->last_shown = 0;
+            logm("[%s] %s plugged back in and works on this PC. Other PCs may take it again in %d s.",
+                 h->busid, dev_name(h->busid, name, sizeof name), g_hold_secs);
         }
         if (h->hold_until) {
             int left = (int)(h->hold_until - now);

@@ -9,4 +9,6 @@ post_upgrade() {
 }
 pre_remove() {
     systemctl disable --now usbeam.service
+    # firewall rules and data USBeam created while running
+    /usr/bin/usbeam --cleanup >/dev/null 2>&1 || true
 }

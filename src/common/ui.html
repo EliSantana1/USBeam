@@ -75,6 +75,29 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
 .netnote .txt div { font-size: 12px; color: var(--muted); }
 .netnote .acts { display: flex; gap: 8px; }
 h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 10px; }
+.gear { width: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.menu { position: absolute; right: 24px; top: 58px; width: min(380px, calc(100vw - 28px)); max-height: calc(100vh - 80px); overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); z-index: 20; padding: 6px 0; }
+.menu .sec { padding: 10px 16px; border-top: 1px solid var(--line2); }
+.menu .sec:first-child { border-top: 0; }
+.menu .lbl { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.menu .line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.menu .line input[type=text] { flex: 1 1 160px; min-height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+.menu .small { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.menu .btn { min-width: 0; min-height: 34px; }
+.menu .item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 9px 16px; font-size: 13px; cursor: pointer; color: var(--text); }
+.menu .item:hover { background: var(--chip); }
+.menu .item.danger { color: var(--bad); font-weight: 600; }
+.menu .netl { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
+.menu .netl .nm { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.menu .netl .st { font-size: 12px; }
+.menu .netl .st.on { color: var(--ok); } .menu .netl .st.off { color: var(--muted); }
+#modalbg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; z-index: 30; padding: 16px; }
+#modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; max-width: 460px; padding: 20px; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+#modal h3 { margin: 0 0 8px; font-size: 16px; }
+#modal p { margin: 0 0 10px; color: var(--muted); }
+#modal .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.btn.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 .addpc { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .addpc input { flex: 0 1 280px; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -95,8 +118,34 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
     <label class="netpick"><span>Connect over</span>
       <select id="net" onchange="act({op:'set_net', value:this.value})"></select>
     </label>
+    <button class="iconbtn gear" id="gearbtn" aria-label="Settings" title="Settings" aria-haspopup="true" aria-expanded="false" onclick="toggleMenu(event)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+    </button>
+  </div>
+  <div id="menu" class="menu" hidden role="dialog" aria-label="Settings">
+    <div class="sec"><div class="lbl">This PC's name</div>
+      <div class="line"><input type="text" id="pcnamein" maxlength="40" aria-label="This PC's name" onkeydown="if(event.key==='Enter')saveName()"><button class="btn" onclick="saveName()">Save</button></div>
+      <div class="small" id="pcnamehint"></div></div>
+    <div class="sec"><label class="auto" style="min-height:0"><input type="checkbox" id="traychk" onchange="act({op:'set_tray', on:this.checked})">Show USBeam in the tray when I sign in</label>
+      <div class="small">USBeam keeps sharing and connecting devices in the background either way.</div></div>
+    <div class="sec"><div class="lbl">Networks</div><div id="menunets"></div></div>
+    <div class="sec"><div class="line" style="justify-content:space-between"><span class="lbl" style="margin:0">Countdown after a device is plugged back in</span>
+      <select id="holdsel" onchange="act({op:'set_hold', value:this.value})"></select></div>
+      <div class="small">How long other PCs wait before they may take a replugged device again.</div></div>
+    <div class="sec"><div class="line" style="justify-content:space-between"><span class="lbl" style="margin:0">Theme</span>
+      <select id="themesel" onchange="act({op:'set_theme', value:this.value})"><option value="system">Same as system</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
+    <div class="sec" style="padding:4px 0">
+      <button class="item" onclick="checkUpdates()">Check for updates</button>
+      <div class="small" id="updstatus" style="padding:0 16px 6px;margin:0" hidden></div>
+      <button class="item" onclick="restartUsbeam()">Restart USBeam</button>
+      <button class="item" onclick="saveDiagnostics()">Save diagnostics</button>
+      <button class="item" onclick="confirmReset()">Reset USBeam…</button>
+      <button class="item" onclick="showAbout()">About USBeam</button>
+    </div>
+    <div class="sec" style="padding:4px 0"><button class="item danger" onclick="confirmUninstall()">Uninstall USBeam…</button></div>
   </div>
 </header>
+<div id="modalbg" role="presentation"><div id="modal" role="dialog" aria-modal="true"></div></div>
 <main>
   <div class="wrap">
     <div id="banner" role="alert"></div>
@@ -118,8 +167,7 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
       <p class="hint">Devices plugged into this PC. They keep working here until another PC starts using them, and come back here when it lets go.</p>
       <p class="hint">Closing this window keeps USBeam running. Open it again from its tray icon.</p>
       <div class="box" id="local"></div>
-      <div id="trusted"></div>
-      <p class="hint" id="ver" style="margin-top:22px"></p>
+      <div class="note" id="hostnote" hidden></div>
     </section>
   </div>
 </main>
@@ -127,7 +175,9 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
 const params = new URLSearchParams(location.search);
 const token = params.get('t') || '';
 if (params.get('theme') === 'dark' || params.get('theme') === 'light') document.documentElement.dataset.theme = params.get('theme');
-let tab = 'net', busy = false, lastPcs = '', lastLocal = '', lastNets = '', lastNetInfo = '';
+let tab = 'net', busy = false, lastPcs = '', lastLocal = '', lastNets = '', lastNetInfo = '', S = {};
+const PROJECT = 'https://github.com/EliSantana1/USBeam';
+const sysTheme = document.documentElement.dataset.theme || '';
 const ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v14M8 7l4-4 4 4M7 12h2v3M17 10h-2v3"></path><circle cx="12" cy="19" r="2"></circle></svg>';
 const PCICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" style="color:var(--muted)"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg>';
 
@@ -220,17 +270,29 @@ function renderNetInfo(s) {
     }
   }
   document.getElementById('netnotes').innerHTML = html;
+  // Gear menu: this PC's networks right now, and (Linux) the networks allowed earlier.
+  const seen = new Set();
   let t = '';
-  if (s.os === 'linux') {
-    const tr = s.trusted || [];
-    t = '<h2 class="sub">Networks USBeam is allowed on</h2>';
-    t += '<p class="hint">ZeroTier and Tailscale are always allowed. Other networks are allowed only after you choose Allow on them.</p>';
-    if (tr.length) t += '<div class="box">' + tr.map(x => `<div class="row"><div class="dinfo"><div class="dname">${esc(x.name)}</div><div class="dsub">${esc(x.id)}</div></div>
-        <button class="btn" data-act="${attr({ op: 'net_forget', net: x.id })}">Remove</button></div>`).join('') + '</div>';
-  } else {
-    t = '<h2 class="sub">Networks</h2><p class="hint">USBeam works on networks Windows marks as Private, and always on ZeroTier and Tailscale. It stays off on Public networks such as cafés, hotels and airports.</p>';
+  for (const n of nets) {
+    if (seen.has(n.id) || n.pending) continue;
+    seen.add(n.id);
+    let btn = '';
+    if (s.os === 'linux' && n.kind === 'home')
+      btn = n.allowed ? `<button class="btn" data-act="${attr({ op: 'net_forget', net: n.id })}">Turn off</button>`
+                      : `<button class="btn" data-act="${attr({ op: 'net_allow', net: n.id })}">Allow</button>`;
+    t += `<div class="netl"><span class="nm">${esc(n.name)} <span class="small">${esc(n.subnet)}</span></span>
+      <span class="st ${n.allowed ? 'on' : 'off'}">${n.allowed ? 'On' : (n.public ? 'Off (Public)' : 'Off')}</span>${btn}</div>`;
   }
-  document.getElementById('trusted').innerHTML = t;
+  if (s.os === 'linux') {
+    const others = (s.trusted || []).filter(x => !seen.has(x.id));
+    if (others.length) t += '<div class="small">Allowed earlier:</div>' + others.map(x => `<div class="netl"><span class="nm">${esc(x.name)}</span>
+      <button class="btn" data-act="${attr({ op: 'net_forget', net: x.id })}">Remove</button></div>`).join('');
+    t += '<div class="small">ZeroTier and Tailscale are always on. Other networks only after you allow them.</div>';
+  } else {
+    t += `<div class="small">On for networks Windows marks Private, always on for ZeroTier and Tailscale, off on Public networks.</div>
+      <div class="line" style="margin-top:6px"><button class="btn" onclick="appLink('open', {url: 'ms-settings:network-status'})">Windows network settings</button></div>`;
+  }
+  document.getElementById('menunets').innerHTML = t || '<div class="small">No networks.</div>';
 }
 function renderLocal(list) {
   const el = document.getElementById('local');
@@ -254,6 +316,111 @@ function renderLocal(list) {
   }).join('');
 }
 
+// ---------------------------------------------------------------- gear menu
+function toggleMenu(e) {
+  e && e.stopPropagation();
+  const m = document.getElementById('menu'), open = m.hidden;
+  m.hidden = !open;
+  document.getElementById('gearbtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) { document.getElementById('pcnamein').value = (S.prefs && S.prefs.name) || ''; document.getElementById('updstatus').hidden = true; }
+}
+document.addEventListener('click', e => { const m = document.getElementById('menu'); if (e.isTrusted && !m.hidden && !m.contains(e.target) && !e.target.closest('#modalbg')) toggleMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); const m = document.getElementById('menu'); if (!m.hidden) toggleMenu(); } });
+let lastPrefs = '';
+function applyPrefs(s) {
+  const p = s.prefs || {};
+  const key = JSON.stringify(p);
+  if (key === lastPrefs) return;
+  lastPrefs = key;
+  const th = p.theme === 'light' || p.theme === 'dark' ? p.theme : sysTheme;
+  if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme;
+  document.getElementById('themesel').value = p.theme || 'system';
+  document.getElementById('traychk').checked = p.tray !== false;
+  document.getElementById('pcnamehint').textContent = 'The name other PCs see. Leave empty to use the computer\'s name (' + (p.hostname || '') + ').';
+  const hs = document.getElementById('holdsel'), opts = [5, 10, 15, 30, 60];
+  if (p.hold && !opts.includes(p.hold)) opts.push(p.hold);
+  hs.innerHTML = opts.sort((a, b) => a - b).map(v => `<option value="${v}" ${v === p.hold ? 'selected' : ''}>${v} seconds</option>`).join('');
+}
+function saveName() { act({ op: 'set_name', value: document.getElementById('pcnamein').value }); }
+// Things only the app around this page can do (open links, update, uninstall) go to it as usbeam-app: links.
+function appLink(what, params) {
+  const q = new URLSearchParams(params || {}).toString();
+  location.href = 'usbeam-app:' + what + (q ? '?' + q : '');
+}
+window.appEvent = e => { if (e && e.text) updStatus(e.text); };
+function updStatus(t) { const el = document.getElementById('updstatus'); el.hidden = !t; el.textContent = t || ''; }
+async function post(body) {
+  const r = await fetch('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-USBeam-Token': token }, body: JSON.stringify(body) });
+  return r.json();
+}
+function restartUsbeam() { toggleMenu(); act({ op: 'restart' }); banner('USBeam is restarting…'); }
+async function saveDiagnostics() {
+  updStatus('Collecting…');
+  try {
+    const j = await post({ op: 'diagnostics' });
+    const d = new Date(), stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([j.text || ''], { type: 'text/plain' }));
+    a.download = 'usbeam-diagnostics-' + stamp + '.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    updStatus('Saved as ' + a.download + ' in your Downloads folder. It may contain names and addresses of your PCs and devices; nothing is sent anywhere.');
+  } catch (e) { updStatus("Couldn't collect diagnostics."); }
+}
+function newer(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0), pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0); }
+  return false;
+}
+async function checkUpdates() {
+  updStatus('Checking…');
+  try {
+    const r = await fetch('https://api.github.com/repos/EliSantana1/USBeam/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
+    if (r.status === 404) { updStatus('No releases have been published yet.'); return; }
+    const j = await r.json();
+    const latest = String(j.tag_name || '').replace(/^v/, '');
+    if (!latest || !newer(latest, S.version)) { updStatus('USBeam ' + S.version + ' is up to date.'); return; }
+    if (S.install === 'package') {
+      updStatus('USBeam ' + latest + ' is available. Update it with your package manager, or get it from the project page.');
+      return;
+    }
+    const pat = S.os === 'windows' ? /^USBeam-Setup-.*\.exe$/ : (S.arch === 'aarch64' ? /-aarch64\.AppImage$/ : /-x86_64\.AppImage$/);
+    const a = (j.assets || []).find(x => pat.test(x.name));
+    if (!a) { updStatus('USBeam ' + latest + ' is available, but not yet for this PC.'); return; }
+    const el = document.getElementById('updstatus');
+    el.hidden = false;
+    el.innerHTML = 'USBeam ' + esc(latest) + ' is available. <button class="btn primary" style="margin-left:6px" id="updbtn">Update now</button>';
+    document.getElementById('updbtn').onclick = () => {
+      updStatus('Downloading USBeam ' + latest + '…');
+      appLink('update', { url: a.browser_download_url, sha256: String(a.digest || '').replace(/^sha256:/, ''), version: latest });
+    };
+  } catch (e) { updStatus("Couldn't check for updates. Is this PC online?"); }
+}
+function modal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modalbg').style.display = 'flex'; }
+function closeModal() { document.getElementById('modalbg').style.display = 'none'; }
+function confirmReset() {
+  toggleMenu();
+  modal(`<h3>Reset USBeam?</h3>
+    <p>This lets go of devices this PC uses from other PCs, forgets remembered PCs${S.os === 'linux' ? ', allowed networks' : ''} and your settings (name, countdown, theme, tray). All of this PC's devices are shared again as usual.</p>
+    <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="closeModal();act({op:'reset'})">Reset</button></div>`);
+}
+function showAbout() {
+  toggleMenu();
+  modal(`<h3>USBeam ${esc(S.version || '')}</h3>
+    <p>Free, open-source USB over IP for Windows and Linux.</p>
+    <p>License: GNU General Public License, version 3 or later.</p>
+    <div class="acts"><button class="btn" onclick="appLink('open',{url:PROJECT})">Project page</button><button class="btn primary" onclick="closeModal()">Close</button></div>`);
+}
+function confirmUninstall() {
+  toggleMenu();
+  const how = S.os === 'windows' ? 'Windows will ask for permission.'
+    : S.install === 'package' ? 'This removes the USBeam package. You will be asked for your password.'
+    : 'Finally USBeam deletes itself. You will be asked for your password.';
+  modal(`<h3>Uninstall USBeam?</h3>
+    <p>USBeam stops, lets go of devices this PC uses from other PCs and returns shared devices to this PC. Then it removes its background service, firewall rules, settings, start at sign-in and its program files.</p>
+    <p>${how}</p>
+    <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn danger" onclick="closeModal();banner('Uninstalling USBeam…');appLink('uninstall')">Uninstall</button></div>`);
+}
+
 async function refresh() {
   if (busy) return;
   try {
@@ -261,7 +428,10 @@ async function refresh() {
     if (r.status === 403) { banner('This window is out of date. Open USBeam again from its icon.'); return; }
     const s = await r.json();
     document.getElementById('pcname').textContent = 'This PC: ' + (s.name || '');
-    document.getElementById('ver').textContent = s.version ? 'USBeam ' + s.version : '';
+    S = s;
+    applyPrefs(s);
+    const hn = document.getElementById('hostnote');
+    hn.hidden = !s.host_note; hn.textContent = s.host_note || '';
     const nets = JSON.stringify([s.nets, s.net]);
     if (nets !== lastNets && document.activeElement?.id !== 'net') {
       lastNets = nets;

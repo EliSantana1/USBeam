@@ -15,6 +15,8 @@
 #define DISCO_PORT 3241
 
 static char g_name[64];
+static int g_hold_secs = 10;               // countdown before a replugged device may be taken again
+static volatile LONG g_restart;            // "Restart USBeam" from the gear menu
 static char g_id[33];
 static char g_boot_id[64];
 static char g_cfg_path[MAX_PATH];
@@ -226,7 +228,7 @@ static void load_config(void) {
 }
 
 // ---------------------------------------------------------------- background monitor (host side)
-// Once a second: give replugged devices back to this PC (then a 10 s countdown before
+// Once a second: give replugged devices back to this PC (then a countdown before
 // other PCs may take them again), finish countdowns, and fix devices left on WinUSB.
 static DWORD WINAPI monitor_main(LPVOID arg) {
     for (;;) {
@@ -242,8 +244,8 @@ static DWORD WINAPI monitor_main(LPVOID arg) {
                 revert_driver(d);
                 if (d->returning) {
                     d->returning = 0;
-                    d->hold_until = GetTickCount64() + 10000; d->last_shown = 0;
-                    say("[%s] %ls works on this PC now. Other PCs may take it again in 10 s (Cancel in the USBeam window).", d->busid, d->name);
+                    d->hold_until = GetTickCount64() + (ULONGLONG)g_hold_secs * 1000; d->last_shown = 0;
+                    say("[%s] %ls works on this PC now. Other PCs may take it again in %d s (Cancel in the USBeam window).", d->busid, d->name, g_hold_secs);
                 }
                 InterlockedExchange(&d->busy, 0);
                 continue;
@@ -597,12 +599,52 @@ static void add_local_json(sb_t *j) {
     sb_add(j, "]", 1);
 }
 
+static int ui_api(const char *method, const char *path, const char *body, sb_t *out);
+
+// "Save diagnostics": everything useful for finding a problem, as one text (the app saves it as a file).
+static void diagnostics(sb_t *out) {
+    sb_t t = {0};
+    SYSTEMTIME st; GetLocalTime(&st);
+    OSVERSIONINFOW ov = { sizeof ov };
+    typedef LONG (WINAPI *RtlGetVersion_t)(OSVERSIONINFOW *);
+    RtlGetVersion_t rgv = (RtlGetVersion_t)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+    if (rgv) rgv(&ov);
+    sb_printf(&t, "USBeam %s diagnostics, %04d-%02d-%02d %02d:%02d\nWindows %lu.%lu build %lu\nThis PC: %s (id %s)\nusbip-win2: %s\n\n",
+              USBEAM_VERSION, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+              ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_name, g_id, have_usbip() ? "installed" : "not installed");
+    sb_printf(&t, "%s", "State:\n");
+    ui_api("GET", "/api/state", "", &t);
+    sb_printf(&t, "%s", "\n\nLog (most recent last):\n");
+    EnterCriticalSection(&g_log_cs);
+    if (g_log) fflush(g_log);
+    FILE *f = _wfopen(g_log_path, L"rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f), from = n > 200000 ? n - 200000 : 0;
+        fseek(f, from, SEEK_SET);
+        char buf[4096]; size_t k;
+        while ((k = fread(buf, 1, sizeof buf, f)) > 0) sb_add(&t, buf, k);
+        fclose(f);
+    }
+    LeaveCriticalSection(&g_log_cs);
+    sb_add(out, "{\"ok\":true,\"text\":", 18);
+    sb_jstr(out, t.p ? t.p : "");
+    sb_add(out, "}", 1);
+    sb_free(&t);
+}
+
 static int ui_api(const char *method, const char *path, const char *body, sb_t *out) {
     if (!strcmp(method, "GET") && !strcmp(path, "/api/state")) {
         sb_printf(out, "%s", "{\"os\":\"windows\",\"version\":\"" USBEAM_VERSION "\",\"name\":"); sb_jstr(out, g_name);
         sb_add(out, ",", 1); add_local_json(out);
         sb_add(out, ",", 1); client_json(out);
         sb_add(out, ",", 1); nets_json(out);
+        sb_add(out, ",", 1); prefs_json(out);
+#if defined(__aarch64__) || defined(_M_ARM64)
+        sb_printf(out, "%s", ",\"arch\":\"arm64\",\"install\":\"windows\"");
+#else
+        sb_printf(out, "%s", ",\"arch\":\"x64\",\"install\":\"windows\"");
+#endif
         sb_add(out, "}", 1);
         return 200;
     }
@@ -615,6 +657,16 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
 
     if (!strcmp(op, "forget_auto")) { client_forget_auto(); }
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); SetEvent(g_quit_event); }
+    else if (!strcmp(op, "restart")) { logm("Restart requested from the USBeam app"); InterlockedExchange(&g_restart, 1); SetEvent(g_quit_event); }
+    else if (!strcmp(op, "diagnostics")) { diagnostics(out); return 200; }
+    else if (!strcmp(op, "reset")) {
+        EnterCriticalSection(&g_devs_cs);
+        for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used) { g_devs[i].hidden = 0; g_devs[i].share_forced = 0; g_devs[i].blocked = 0; g_devs[i].hold_until = 0; }
+        LeaveCriticalSection(&g_devs_cs);
+        nets_lock(); memset(g_nets_later, 0, sizeof g_nets_later); nets_unlock();
+        int c2 = 200; client_action("reset_client", body, out, &c2);
+        logm("USBeam was reset to its starting settings");
+    }
     else if (!strcmp(op, "net_later")) { char nid[96]; json_str(body, "net", nid, sizeof nid); if (nid[0]) nets_later(nid); }
     else if (!strcmp(op, "local_cancel")) { if (d && d->hold_until) { d->hold_until = 0; d->blocked = 1; say("[%s] reconnect cancelled: %ls stays on this PC", d->busid, d->name); } }
     else if (!strcmp(op, "local_allow")) { if (d) { d->blocked = 0; d->hold_until = 0; } }
@@ -718,6 +770,7 @@ static int engine_run(void) {
     if (uis == INVALID_SOCKET) { logm("ERROR: local port %d is in use", UI_PORT); return 1; }
     write_token_file();
     gethostname(g_name, sizeof g_name);
+    prefs_init();
 
     {   // boot id: when Windows was started (stays the same through sleep and hibernate)
         ULONGLONG up = GetTickCount64() / 1000;
@@ -754,9 +807,9 @@ static int engine_run(void) {
     {   // the app shows "starting…" until the service runs again
         wchar_t p[MAX_PATH]; _snwprintf(p, MAX_PATH, L"%ls\\ui-token", g_data_dir); DeleteFileW(p);
     }
-    logm("======== USBeam service stopped");
+    logm("======== USBeam service stopped%s", g_restart ? " (restarting)" : "");
     if (g_log) fflush(g_log);
-    return 0;
+    return g_restart ? 3 : 0;       // 3: Windows starts the service again (failure actions)
 }
 
 static void WINAPI svc_main(DWORD argc, LPWSTR *argv) {

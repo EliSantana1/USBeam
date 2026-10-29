@@ -259,6 +259,8 @@ static int cmd_use(const char *ip, int n, char **busids) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--service")) return cmd_app(1);
+    if (argc == 2 && !strcmp(argv[1], "--cleanup")) return cmd_cleanup();
+    if (argc == 2 && !strcmp(argv[1], "--version")) { printf("%s\n", USBEAM_VERSION); return 0; }
     if (argc == 1 || (argc == 2 && !strcmp(argv[1], "app"))) return cmd_app(0);
     if (argc >= 3 && !strcmp(argv[1], "list")) return cmd_list(argv[2]);
     if (argc >= 4 && !strcmp(argv[1], "use")) return cmd_use(argv[2], argc - 3, argv + 3);
