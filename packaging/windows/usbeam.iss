@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.3.4"
+#define AppVersion "0.3.5"
 
 [Setup]
 AppId={{6D2C1B54-7E7A-4F1B-9B5D-3E1F0A9C5B21}

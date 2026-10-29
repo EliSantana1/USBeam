@@ -10,21 +10,27 @@ ARCH=x86_64
 
 echo "== tools"
 sudo apt-get update -q
-sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build python3 file patchelf desktop-file-utils \
-    qt6-base-dev qt6-base-dev-tools qt6-webengine-dev qt6-webengine-dev-tools librsvg2-bin \
-    libqt6webenginecore6-bin libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
-# Extras (Wayland, SVG icons, image formats, what Qt WebEngine may also look for): each one if it exists.
-for p in libqt6opengl6-dev qt6-declarative-dev libvulkan-dev qt6-wayland libqt6svg6 libqt6svg6-dev qt6-image-formats-plugins qt6-webchannel-dev qt6-positioning-dev \
-         libqt6webchannel6 libqt6positioning6 qt6-qpa-plugins; do
-    sudo apt-get install -y -q --no-install-recommends "$p" || echo "(skipped $p)"
-done
+sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build python3 python3-pip file patchelf \
+    desktop-file-utils librsvg2-bin libgl1-mesa-dev libegl1 libxkbcommon-dev libxkbcommon-x11-0 libfontconfig1-dev \
+    libnss3 libdbus-1-3 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxcb-cursor0 libxcb-icccm4 \
+    libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+    libxkbfile1 libxshmfence1 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libasound2
+
+QTVER=6.8.3
+echo "== Qt (official $QTVER binaries: current long-term-support version)"
+pip3 install --user -q aqtinstall
+python3 -m aqt install-qt linux desktop "$QTVER" linux_gcc_64 -m qtwebengine qtwebchannel qtpositioning qtimageformats \
+    -O "$ROOT/build/Qt"
+QTDIR=$ROOT/build/Qt/$QTVER/gcc_64
+export PATH="$QTDIR/bin:$PATH" LD_LIBRARY_PATH="$QTDIR/lib"
+[ -f "$QTDIR/lib/libQt6WebEngineCore.so.6" ] || { echo "ERROR: Qt WebEngine missing"; exit 1; }
 
 echo "== engine (static: runs on any distribution)"
 make linux
 file build/usbeam
 
 echo "== window app"
-cmake -S packaging/appimage/app -B build/appimage-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake -S packaging/appimage/app -B build/appimage-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_PREFIX_PATH="$QTDIR"
 cmake --build build/appimage-app
 
 echo "== AppDir"
@@ -56,8 +62,7 @@ curl -fsSL -o linuxdeploy-plugin-qt https://github.com/linuxdeploy/linuxdeploy-p
 curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage
 chmod +x linuxdeploy linuxdeploy-plugin-qt appimagetool
 export APPIMAGE_EXTRACT_AND_RUN=1
-export QMAKE=/usr/lib/qt6/bin/qmake
-[ -x "$QMAKE" ] || QMAKE=$(command -v qmake6)
+export QMAKE=$QTDIR/bin/qmake
 export EXTRA_QT_MODULES="svg"
 # Wayland support, if it was installed above.
 PLAT=$("$QMAKE" -query QT_INSTALL_PLUGINS)/platforms
