@@ -11,7 +11,7 @@ ARCH=x86_64
 echo "== tools"
 sudo apt-get update -q
 sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build python3 file patchelf desktop-file-utils \
-    qt6-base-dev qt6-base-dev-tools qt6-webengine-dev qt6-webengine-dev-tools \
+    qt6-base-dev qt6-base-dev-tools qt6-webengine-dev qt6-webengine-dev-tools librsvg2-bin \
     libqt6webenginecore6-bin libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
 # Extras (Wayland, SVG icons, image formats, what Qt WebEngine may also look for): each one if it exists.
 for p in libqt6opengl6-dev qt6-declarative-dev libvulkan-dev qt6-wayland libqt6svg6 libqt6svg6-dev qt6-image-formats-plugins qt6-webchannel-dev qt6-positioning-dev \
@@ -41,6 +41,9 @@ install -Dm644 packaging/appimage/usbeam.desktop "$L/usbeam.desktop"
 install -Dm644 packaging/appimage/usbeam-autostart.desktop "$L/usbeam-autostart.desktop"
 install -Dm644 assets/usbeam.svg "$L/usbeam.svg"
 install -Dm644 assets/usbeam.svg "$APPDIR/usr/share/icons/hicolor/scalable/apps/usbeam.svg"
+# A PNG icon too: the AppImage tools want one for the file's own icon.
+mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+rsvg-convert -w 256 -h 256 assets/usbeam.svg -o "$APPDIR/usr/share/icons/hicolor/256x256/apps/usbeam.png"
 install -Dm644 packaging/linux/usbeam.desktop "$APPDIR/usr/share/applications/usbeam.desktop"   # Exec=usbeam-app
 # AppImageLauncher: USBeam installs itself, don't offer to "integrate" it.
 echo "X-AppImage-Integrate=false" >> "$APPDIR/usr/share/applications/usbeam.desktop"
@@ -83,6 +86,11 @@ for f in platforms/libqwayland-generic.so wayland-shell-integration/libxdg-shell
     [ -f "$APPDIR/usr/plugins/$f" ] || { echo "ERROR: missing Wayland part $f"; exit 1; }
 done
 ls "$APPDIR/usr/plugins/wayland-graphics-integration-client" || echo "(no Wayland graphics helpers: software drawing)"
+
+# The AppImage's own icon: real files (not links), which newer appimagetool versions require.
+rm -f "$APPDIR/usbeam.png" "$APPDIR/.DirIcon"
+cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/usbeam.png" "$APPDIR/usbeam.png"
+cp "$APPDIR/usbeam.png" "$APPDIR/.DirIcon"
 
 echo "== AppImage"
 OUT=USBeam-$VER-$ARCH.AppImage
