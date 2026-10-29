@@ -6,6 +6,6 @@ Comment=Share USB devices between your computers
 Exec=env APPIMAGELAUNCHER_DISABLE=1 /opt/usbeam/USBeam.AppImage
 Icon=usbeam
 Terminal=false
-Categories=System;Utility;Network;
+Categories=Utility;
 Keywords=USB;IP;share;remote;device;
 StartupWMClass=usbeam

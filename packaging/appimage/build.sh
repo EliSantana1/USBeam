@@ -19,7 +19,7 @@ sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-b
 QTVER=6.8.3
 echo "== Qt (official $QTVER binaries: current long-term-support version)"
 pip3 install --user -q aqtinstall
-python3 -m aqt install-qt linux desktop "$QTVER" linux_gcc_64 -m qtwebengine qtwebchannel qtpositioning qtimageformats \
+python3 -m aqt install-qt linux desktop "$QTVER" linux_gcc_64 -m qtwebengine qtwebchannel qtpositioning qtserialport qtimageformats \
     -O "$ROOT/build/Qt"
 QTDIR=$ROOT/build/Qt/$QTVER/gcc_64
 export PATH="$QTDIR/bin:$PATH" LD_LIBRARY_PATH="$QTDIR/lib"
