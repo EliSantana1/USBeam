@@ -42,6 +42,8 @@ install -Dm644 packaging/appimage/usbeam-autostart.desktop "$L/usbeam-autostart.
 install -Dm644 assets/usbeam.svg "$L/usbeam.svg"
 install -Dm644 assets/usbeam.svg "$APPDIR/usr/share/icons/hicolor/scalable/apps/usbeam.svg"
 install -Dm644 packaging/linux/usbeam.desktop "$APPDIR/usr/share/applications/usbeam.desktop"   # Exec=usbeam-app
+# AppImageLauncher: USBeam installs itself, don't offer to "integrate" it.
+echo "X-AppImage-Integrate=false" >> "$APPDIR/usr/share/applications/usbeam.desktop"
 install -Dm644 LICENSE "$APPDIR/usr/share/licenses/usbeam/LICENSE"
 
 echo "== bundle Qt"
@@ -62,9 +64,25 @@ for f in libqwayland-generic.so libqwayland-egl.so; do
 done
 if [ -n "$WL" ]; then export EXTRA_PLATFORM_PLUGINS="$WL"; fi
 echo "Wayland plugins: ${WL:-none}"
+[ -n "$WL" ] || { echo "ERROR: Qt's Wayland support is missing"; exit 1; }
 ./linuxdeploy --appdir "$APPDIR" --plugin qt \
     --desktop-file "$APPDIR/usr/share/applications/usbeam.desktop" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/scalable/apps/usbeam.svg"
+
+# Wayland helper plugins the Qt bundler doesn't pick up by itself (graphics, window decorations,
+# window types), with the libraries they need.
+QTPLUG=$("$QMAKE" -query QT_INSTALL_PLUGINS)
+for d in wayland-graphics-integration-client wayland-decoration-client wayland-shell-integration; do
+    if [ -d "$QTPLUG/$d" ]; then
+        mkdir -p "$APPDIR/usr/plugins/$d"
+        cp -n "$QTPLUG/$d"/*.so "$APPDIR/usr/plugins/$d/"
+        ./linuxdeploy --appdir "$APPDIR" --deploy-deps-only "$APPDIR/usr/plugins/$d"
+    fi
+done
+for f in platforms/libqwayland-generic.so wayland-shell-integration/libxdg-shell.so; do
+    [ -f "$APPDIR/usr/plugins/$f" ] || { echo "ERROR: missing Wayland part $f"; exit 1; }
+done
+ls "$APPDIR/usr/plugins/wayland-graphics-integration-client" || echo "(no Wayland graphics helpers: software drawing)"
 
 echo "== AppImage"
 OUT=USBeam-$VER-$ARCH.AppImage

@@ -408,6 +408,7 @@ function showAbout() {
   modal(`<h3>USBeam ${esc(S.version || '')}</h3>
     <p>Free, open-source USB over IP for Windows and Linux.</p>
     <p>License: GNU General Public License, version 3 or later.</p>
+    ${['wayland','x11'].includes(params.get('display')) ? `<p>Window: ${params.get('display') === 'wayland' ? 'Wayland' : 'X11'}</p>` : ''}
     <div class="acts"><button class="btn" onclick="appLink('open',{url:PROJECT})">Project page</button><button class="btn primary" onclick="closeModal()">Close</button></div>`);
 }
 function confirmUninstall() {

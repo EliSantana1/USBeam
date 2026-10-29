@@ -232,7 +232,8 @@ public:
                               .arg(bg, fg, msg));
             return;
         }
-        view->load(QUrl(QString("http://127.0.0.1:%1/?t=%2&theme=%3").arg(UI_PORT).arg(token, darkTheme() ? "dark" : "light")));
+        const QString display = QGuiApplication::platformName().startsWith("wayland") ? "wayland" : QGuiApplication::platformName() == "xcb" ? "x11" : "";
+        view->load(QUrl(QString("http://127.0.0.1:%1/?t=%2&theme=%3&display=%4").arg(UI_PORT).arg(token, darkTheme() ? "dark" : "light", display)));
     }
 
     void showUp() {
@@ -273,8 +274,19 @@ static void removeUserData() {
 int main(int argc, char **argv) {
     // Inside the AppImage, Chromium's own sandbox (used by the window's web view) often can't start
     // (it needs features some distributions restrict). The window only shows USBeam's own local page.
-    if (!qEnvironmentVariableIsEmpty("APPIMAGE") && qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX"))
-        qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
+    if (!qEnvironmentVariableIsEmpty("APPIMAGE")) {
+        if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
+        // Draw the window without the graphics card: Qt inside the AppImage can't always use the
+        // computer's own graphics drivers, and USBeam's simple page doesn't need them.
+        if (qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND")) qputenv("QT_QUICK_BACKEND", "software");
+        // AppImageLauncher (installed on some systems): don't offer to "integrate" USBeam,
+        // it installs itself. Also applies to the copies of USBeam this one starts.
+        qputenv("APPIMAGELAUNCHER_DISABLE", "1");
+    }
+    // Wayland first; X11 only on desktops without Wayland.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") &&
+        (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland"))
+        qputenv("QT_QPA_PLATFORM", "wayland;xcb");
     QApplication app(argc, argv);
     app.setApplicationName("USBeam");
     app.setApplicationDisplayName("USBeam");

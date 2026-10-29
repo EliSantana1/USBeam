@@ -2,7 +2,7 @@
 Type=Application
 Name=USBeam
 Comment=USBeam tray icon
-Exec=/opt/usbeam/USBeam.AppImage --tray
+Exec=env APPIMAGELAUNCHER_DISABLE=1 /opt/usbeam/USBeam.AppImage --tray
 Icon=usbeam
 Terminal=false
 NoDisplay=true

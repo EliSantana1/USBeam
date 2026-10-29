@@ -3,7 +3,7 @@ Type=Application
 Name=USBeam
 GenericName=USB over network
 Comment=Share USB devices between your computers
-Exec=/opt/usbeam/USBeam.AppImage
+Exec=env APPIMAGELAUNCHER_DISABLE=1 /opt/usbeam/USBeam.AppImage
 Icon=usbeam
 Terminal=false
 Categories=System;Utility;Network;
