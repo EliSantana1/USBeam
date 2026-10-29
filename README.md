@@ -28,6 +28,20 @@ See [Releases](../../releases):
 - **Linux** (most distributions with systemd): `USBeam-<version>-x86_64.AppImage`
 - **Arch Linux and Arch-based**: `usbeam-<version>-x86_64.pkg.tar.zst`
 
+## Installing
+
+**Windows:** run `USBeam-Setup-<version>.exe` and follow the steps.
+
+**Linux (AppImage):** no terminal needed.
+
+1. Download `USBeam-<version>-x86_64.AppImage`.
+2. Right-click the file → **Properties** → **Permissions**, and tick **Allow executing file as
+   program** (in some file managers: **Is executable**).
+3. Double-click the file, click **Install**, and enter your password.
+
+USBeam then starts with your computer, appears in your application menu, and updates itself
+from its settings menu (the gear icon), where you can also uninstall it.
+
 ## License
 
 USBeam is free software: you can redistribute it and/or modify it under the
