@@ -208,7 +208,7 @@ static void net_display_name(const char *ifn, uint32_t net, char *out, size_t n)
     int safe = 1;
     for (const char *c = ifn; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_' && *c != '.') safe = 0;
     if (safe) {
-        snprintf(cmd, sizeof cmd, "nmcli -t -g GENERAL.CONNECTION device show '%s' 2>/dev/null", ifn);
+        snprintf(cmd, sizeof cmd, "timeout 3 nmcli -t -g GENERAL.CONNECTION device show '%s' 2>/dev/null", ifn);
         FILE *p = popen(cmd, "r");
         if (p) { if (!fgets(name, sizeof name, p)) name[0] = 0; pclose(p); }
         name[strcspn(name, "\r\n")] = 0;
@@ -316,6 +316,8 @@ static void host_state(const char *busid, const char **state, const char **peer,
 static void handle_hello(int s, const char *peer, const uint8_t *op) {
     uint32_t len = (uint32_t)op[4] << 24 | (uint32_t)op[5] << 16 | (uint32_t)op[6] << 8 | op[7];
     char buf[260];
+    struct timeval tv = { 2, 0 };                 // short: a stalled sender must not hold up other PCs
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     if (len == 0 || len > 256 || recv_all(s, buf, len)) return;
     buf[len] = 0;
     disco_received(buf, peer);
@@ -406,7 +408,7 @@ static void disco_receive(int us) {
 // Firewall (ufw, when it is switched on): open USBeam's ports only for the networks USBeam
 // may be used on, and remove rules USBeam added earlier for other networks.
 static void firewall_sync(void) {
-    if (system("command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'") != 0) return;
+    if (system("command -v ufw >/dev/null 2>&1 && timeout 20 ufw status 2>/dev/null | grep -q 'Status: active'") != 0) return;
     char want[MAXNETS][40]; int nw = 0;
     nets_lock();
     for (int i = 0; i < g_nnets && nw < MAXNETS; i++) {
@@ -422,7 +424,7 @@ static void firewall_sync(void) {
     nets_unlock();
     char cmd[256];
     // Remove USBeam's rules for networks that are no longer allowed.
-    FILE *p = popen("ufw status 2>/dev/null", "r");
+    FILE *p = popen("timeout 20 ufw status 2>/dev/null", "r");
     char line[512], have[64][40]; int nh = 0;
     while (p && fgets(line, sizeof line, p) && nh < 64) {
         if (!strstr(line, "# USBeam") || strncmp(line, "3240/tcp", 8)) continue;
@@ -436,15 +438,15 @@ static void firewall_sync(void) {
         int keep = 0;
         for (int k = 0; k < nw; k++) if (!strcmp(have[h], want[k])) keep = 1;
         if (keep) continue;
-        snprintf(cmd, sizeof cmd, "ufw delete allow from %s to any port 3240 proto tcp >/dev/null 2>&1", have[h]);
+        snprintf(cmd, sizeof cmd, "timeout 20 ufw delete allow from %s to any port 3240 proto tcp >/dev/null 2>&1", have[h]);
         if (system(cmd) != 0) logm("Could not remove firewall rule for %s", have[h]);
-        snprintf(cmd, sizeof cmd, "ufw delete allow from %s to any port 3241 proto udp >/dev/null 2>&1", have[h]);
+        snprintf(cmd, sizeof cmd, "timeout 20 ufw delete allow from %s to any port 3241 proto udp >/dev/null 2>&1", have[h]);
         if (system(cmd) != 0) logm("Could not remove firewall rule for %s", have[h]);
     }
     for (int k = 0; k < nw; k++) {
-        snprintf(cmd, sizeof cmd, "ufw allow from %s to any port 3240 proto tcp comment USBeam >/dev/null 2>&1", want[k]);
+        snprintf(cmd, sizeof cmd, "timeout 20 ufw allow from %s to any port 3240 proto tcp comment USBeam >/dev/null 2>&1", want[k]);
         if (system(cmd) != 0) logm("Could not add firewall rule for %s", want[k]);
-        snprintf(cmd, sizeof cmd, "ufw allow from %s to any port 3241 proto udp comment USBeam >/dev/null 2>&1", want[k]);
+        snprintf(cmd, sizeof cmd, "timeout 20 ufw allow from %s to any port 3241 proto udp comment USBeam >/dev/null 2>&1", want[k]);
         if (system(cmd) != 0) logm("Could not add firewall rule for %s", want[k]);
     }
     logm("Firewall (ufw): USBeam allowed on %d network(s)", nw);

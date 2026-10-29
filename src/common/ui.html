@@ -195,7 +195,7 @@ function renderPcs(s) {
   for (const pc of pcs) {
     html += `<section class="box"><div class="boxhead">${PCICON}<span class="name">${esc(pc.name)}</span>
       <span class="status ${pc.online ? 'on' : 'off'}">${pc.online ? 'Online' : 'Offline'}</span><div class="spacer"></div>
-      <span class="via">${esc(pc.via)}</span></div>`;
+      <span class="via">${esc(pc.via)}</span>${pc.online ? '' : `<button class="btn" style="min-width:0" data-act="${attr({ op: 'forget_pc', pc: pc.id })}" title="Remove this PC from the list. It comes back automatically if it shows up again.">Forget</button>`}</div>`;
     if (!pc.devices.length) html += `<div class="row"><span class="dsub">${pc.online ? 'No shared devices.' : 'Not reachable right now.'}</span></div>`;
     for (const d of pc.devices) html += remoteRow(pc, d);
     html += '</section>';

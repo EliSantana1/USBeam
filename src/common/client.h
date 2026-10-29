@@ -53,6 +53,7 @@ typedef struct {
     unsigned long long next_poll;
     unsigned long long next_hello;  // when to introduce this PC to it again
     long long seen_at;              // last time it answered or announced itself (wall clock)
+    unsigned long long offline_since; // when it stopped answering (0 = reachable)
     int ndev; RDev dev[CL_MAXRD];
 } Remote;
 typedef struct {
@@ -180,9 +181,9 @@ static uint16_t cl_g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); 
 static uint32_t cl_g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static void cl_op(uint8_t *h, uint16_t code) { memset(h, 0, 8); h[0] = 0x01; h[1] = 0x11; h[2] = code >> 8; h[3] = code & 0xFF; }
 
-static int poll_pc(const char *ip, PollResult *out) {
+static int poll_pc(const char *ip, PollResult *out, int ms) {
     memset(out, 0, sizeof *out);
-    plat_sock s = plat_connect(ip, 1500);
+    plat_sock s = plat_connect(ip, ms);
     if (s == PLAT_BAD_SOCK) return -1;
     uint8_t h[12];
     cl_op(h, OP_REQ_INFO);
@@ -217,7 +218,7 @@ static int poll_pc(const char *ip, PollResult *out) {
     }
     plat_close(s);
     // Not a USBeam PC: fall back to the standard USB/IP device list.
-    s = plat_connect(ip, 1500);
+    s = plat_connect(ip, ms);
     if (s == PLAT_BAD_SOCK) return -1;
     cl_op(h, 0x8005);
     if (plat_send(s, h, 8) || plat_recv(s, h, 12)) { plat_close(s); return -1; }
@@ -281,18 +282,19 @@ static void peer_label(const char *ip, char *out, size_t n, int cl_held);
 static void client_tick(void) {
     unsigned long long now = now_ms();
     // 1. Poll every address of every PC that is due.
-    char ips[CL_MAXR * CL_MAXA][64]; int nip = 0;
+    // A PC that isn't answering gets a short time limit, so it can't slow everything else down.
+    char ips[CL_MAXR * CL_MAXA][64]; int tmo[CL_MAXR * CL_MAXA]; int nip = 0;
     cl_lock();
     for (int i = 0; i < CL_MAXR; i++) {
         Remote *r = &g_r[i];
         if (!r->id[0] || now < r->next_poll) continue;
         r->next_poll = now + 2500;
-        for (int k = 0; k < r->naddr; k++) snprintf(ips[nip++], 64, "%s", r->addr[k].ip);
+        for (int k = 0; k < r->naddr; k++) { tmo[nip] = r->offline_since ? 800 : 1500; snprintf(ips[nip++], 64, "%s", r->addr[k].ip); }
     }
     cl_unlock();
     static PollResult pr;
     for (int i = 0; i < nip; i++) {
-        int ok = poll_pc(ips[i], &pr) == 0;
+        int ok = poll_pc(ips[i], &pr, tmo[i]) == 0;
         int hello = 0;
         cl_lock();
         Remote *r = rm_by_ip(ips[i]);
@@ -312,8 +314,14 @@ static void client_tick(void) {
                     snprintf(u->pid, sizeof u->pid, "%s", r->dev[k].pid);
                 }
             }
-            if (r->via < 0) { r->ndev = 0; r->next_poll = now + 15000; }   // unreachable: check less often (an announcement re-checks at once)
-            else if (r->next_poll > now + 2500) r->next_poll = now + 2500;
+            if (r->via < 0) {                    // unreachable: check less often (an announcement or introduction re-checks at once)
+                r->ndev = 0;
+                if (!r->offline_since) r->offline_since = now;
+                r->next_poll = now + (now - r->offline_since > 120000 ? 60000 : 15000);
+            } else {
+                r->offline_since = 0;
+                if (r->next_poll > now + 2500) r->next_poll = now + 2500;
+            }
         }
         cl_unlock();
         if (hello) send_hello(ips[i]);     // let it know this PC exists too (if its announcements never reach us)
@@ -455,7 +463,8 @@ static void client_save_lines(FILE *f) {
 static int client_load_line(const char *line) {
     char a[64], b[64], c[64];
     if (sscanf(line, "net %63s", a) == 1) { for (int i = 0; i < 4; i++) if (!strcmp(a, NET_KEY[i])) g_netpref = i; return 1; }
-    if (sscanf(line, "pc %63s", a) == 1) {
+    if (!strncmp(line, "pc ", 3) && sscanf(line + 3, "%63s", a) == 1) {
+        if (!ip_u32(a)) return 1;             // not an address (e.g. left by 0.2.7, which misread "pcseen" lines)
         Remote *r = rm_by_ip(a);
         if (!r) { char id[40]; snprintf(id, sizeof id, "ip:%.36s", a); r = rm_new(id); }
         if (r) { rm_add_addr(r, a); r->manual = 1; }
@@ -469,7 +478,7 @@ static int client_load_line(const char *line) {
             if (r) {
                 if (!r->name[0]) snprintf(r->name, sizeof r->name, "%s", nm);
                 r->seen_at = seen;
-                for (char *ip = strtok(ipl, ","); ip; ip = strtok(NULL, ",")) rm_add_addr(r, ip);
+                for (char *ip = strtok(ipl, ","); ip; ip = strtok(NULL, ",")) if (ip_u32(ip)) rm_add_addr(r, ip);
             }
         }
         return 1;
@@ -580,6 +589,18 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         cl_lock();
         for (int i = 0; i < CL_MAXR; i++) if (g_r[i].id[0]) { g_r[i].via = rm_pick(&g_r[i]); if (g_r[i].via < 0) g_r[i].ndev = 0; g_r[i].next_poll = 0; }
         cl_unlock();
+        client_save();
+        return 1;
+    }
+    if (!strcmp(op, "forget_pc")) {            // remove an offline PC from the list (it comes back if it shows up again)
+        char pcid[40] = ""; json_str(body, "pc", pcid, sizeof pcid);
+        cl_lock();
+        Remote *r = pcid[0] ? rm_find(pcid) : NULL;
+        int busy = 0;
+        for (int i = 0; r && i < CL_MAXW; i++) if (g_use[i].used && !strcmp(g_use[i].pc, r->id)) busy = 1;
+        if (r && !busy) { logm("Forgot %s", r->name[0] ? r->name : r->id); r->id[0] = 0; }
+        cl_unlock();
+        if (busy) { sb_printf(out, "%s", "{\"error\":\"Release this PC's devices first.\"}"); *code = 400; return 1; }
         client_save();
         return 1;
     }

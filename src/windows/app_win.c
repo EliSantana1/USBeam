@@ -180,10 +180,16 @@ static int plat_networks(NetInfo *out, int max) {
 }
 
 // ---------------------------------------------------------------- settings file
+// Saved from several threads: one at a time, into a new file that then replaces the old one
+// (a crash or power loss mid-save can't leave a half-written settings file).
+static CRITICAL_SECTION g_save_cs;
 static void save_config(void) {
-    FILE *f = fopen(g_cfg_path, "w");
-    if (!f) return;
+    EnterCriticalSection(&g_save_cs);
+    char tmp[MAX_PATH + 8]; snprintf(tmp, sizeof tmp, "%s.new", g_cfg_path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { LeaveCriticalSection(&g_save_cs); return; }
     fprintf(f, "id %s\n", g_id);
+    EnterCriticalSection(&g_devs_cs);
     for (int i = 0; i < MAX_DEVS; i++) {
         Dev *d = &g_devs[i];
         if (!d->used) continue;
@@ -191,10 +197,15 @@ static void save_config(void) {
         if (d->hidden) fprintf(f, "hide %s\n", u);
         if (d->share_forced) fprintf(f, "share %s\n", u);
     }
+    LeaveCriticalSection(&g_devs_cs);
     cl_lock();
     client_save_lines(f);
     cl_unlock();
+    int ok = fflush(f) == 0;
     fclose(f);
+    if (ok) MoveFileExA(tmp, g_cfg_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    else DeleteFileA(tmp);
+    LeaveCriticalSection(&g_save_cs);
 }
 static void client_save(void) { save_config(); }
 
@@ -265,6 +276,7 @@ static const char *local_state(Dev *d, int *countdown) {
 static void handle_hello(SOCKET s, const char *peer, const uint8_t *op) {
     uint32_t len = (uint32_t)op[4] << 24 | (uint32_t)op[5] << 16 | (uint32_t)op[6] << 8 | op[7];
     char buf[260];
+    DWORD to = 2000; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof to);
     if (len == 0 || len > 256 || !recv_all(s, buf, (int)len)) return;
     buf[len] = 0;
     disco_received(buf, peer);
@@ -673,6 +685,7 @@ static int engine_run(void) {
     InitializeCriticalSection(&g_hubdesc_cs);
     InitializeCriticalSection(&g_cl_cs);
     InitializeCriticalSection(&g_nets_cs);
+    InitializeCriticalSection(&g_save_cs);
     g_quit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     wchar_t pd[MAX_PATH];
