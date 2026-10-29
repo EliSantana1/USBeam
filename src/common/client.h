@@ -155,6 +155,31 @@ static Remote *remote_seen(const char *id, const char *name, const char *ip) {
         logm("Found USBeam on %s (%s)", name && name[0] ? name : "?", ip);
         g_cl_dirty = 1;
     }
+    // An address belongs to one PC at a time. Another entry still listing it is out of date: that PC
+    // was reinstalled or reset (new id), or the address now belongs to a different PC.
+    for (int i = 0; i < CL_MAXR; i++) {
+        Remote *o = &g_r[i];
+        if (!o->id[0] || o == r) continue;
+        int k = 0;
+        while (k < o->naddr && strcmp(o->addr[k].ip, ip)) k++;
+        if (k == o->naddr) continue;
+        memmove(&o->addr[k], &o->addr[k + 1], sizeof o->addr[0] * (size_t)(o->naddr - k - 1));
+        o->naddr--;
+        o->via = -1;
+        g_cl_dirty = 1;
+        if (o->naddr > 0) continue;
+        // No addresses left: the old entry goes. Same name = the same PC with a new id, so devices
+        // used from it (and auto-reconnect) carry over to the new entry.
+        int same = name && name[0] && !strcmp(o->name, name);
+        logm("%s (%s) now answers as a new installation; old entry removed", o->name[0] ? o->name : "?", ip);
+        for (int u = 0; u < CL_MAXW; u++)
+            if (g_use[u].used && !strcmp(g_use[u].pc, o->id)) {
+                if (same && !use_find(r->id, g_use[u].busid)) snprintf(g_use[u].pc, sizeof g_use[u].pc, "%s", r->id);
+                else if (g_use[u].port < 0) g_use[u].used = 0;          // not connected: drop the stale entry
+            }
+        r->manual |= o->manual;
+        o->id[0] = 0;
+    }
     if (name && name[0] && strcmp(r->name, name)) { snprintf(r->name, sizeof r->name, "%s", name); g_cl_dirty = 1; }
     int had = r->naddr;
     rm_add_addr(r, ip);
