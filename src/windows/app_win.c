@@ -261,11 +261,21 @@ static const char *local_state(Dev *d, int *countdown) {
     return "available";
 }
 
+// Another PC introduces itself ("USBEAM2\t<id>\t<name>"), as if its announcement had arrived.
+static void handle_hello(SOCKET s, const char *peer, const uint8_t *op) {
+    uint32_t len = (uint32_t)op[4] << 24 | (uint32_t)op[5] << 16 | (uint32_t)op[6] << 8 | op[7];
+    char buf[260];
+    if (len == 0 || len > 256 || !recv_all(s, buf, (int)len)) return;
+    buf[len] = 0;
+    disco_received(buf, peer);
+}
+
 static void handle_info(SOCKET s) {
     refresh_devices();
     sb_t j = {0};
     sb_add(&j, "{\"name\":", 8); sb_jstr(&j, g_name);
     sb_add(&j, ",\"id\":", 6); sb_jstr(&j, g_id);
+    sb_add(&j, ",\"hello\":true", 13);           // this version understands OP_REQ_HELLO
     sb_add(&j, ",\"devices\":[", 12);
     int first = 1;
     EnterCriticalSection(&g_devs_cs);
@@ -510,7 +520,11 @@ static DWORD WINAPI disco_main(LPVOID arg) {
         buf[n] = 0;
         char ip[64]; inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
         if (is_local_ip(ip) || !net_str_allowed(ip)) continue;
-        disco_received(buf, ip);
+        if (disco_received(buf, ip) && disco_reply_due(ip)) {   // answer directly: one announcement getting through is enough
+            char msg[128]; int len = disco_message(msg, sizeof msg);
+            struct sockaddr_in to = from; to.sin_port = htons(DISCO_PORT);
+            if (len > 0) sendto(snd, msg, len, 0, (struct sockaddr *)&to, sizeof to);
+        }
     }
     closesocket(us);
     closesocket(snd);

@@ -34,6 +34,7 @@
 
 #define OP_REQ_INFO 0x8FE1        // USBeam extension: device names and states as JSON
 #define OP_REP_INFO 0x0FE1
+#define OP_REQ_HELLO 0x8FE2       // USBeam extension: "this is me" (id + name), so both sides know each other
 #define CL_MAXR 16                // remote PCs
 #define CL_MAXA 6                 // addresses per PC
 #define CL_MAXRD 32               // devices per PC
@@ -50,6 +51,8 @@ typedef struct {
     int manual;                 // added by address (kept in settings)
     int via;                    // index into addr[] in use, -1 = none
     unsigned long long next_poll;
+    unsigned long long next_hello;  // when to introduce this PC to it again
+    long long seen_at;              // last time it answered or announced itself (wall clock)
     int ndev; RDev dev[CL_MAXRD];
 } Remote;
 typedef struct {
@@ -128,6 +131,8 @@ static Use *use_new(const char *pc, const char *busid) {
     return NULL;
 }
 
+static int g_cl_dirty;            // the list of known PCs changed: save it
+
 // A PC was seen (discovery message or info reply) at `ip` with USBeam id `id`.
 // Keeps exactly one entry per PC, merging an entry that was added by address.
 static Remote *remote_seen(const char *id, const char *name, const char *ip) {
@@ -145,9 +150,13 @@ static Remote *remote_seen(const char *id, const char *name, const char *ip) {
     if (!r) {
         if (!(r = rm_new(id))) return NULL;
         logm("Found USBeam on %s (%s)", name && name[0] ? name : "?", ip);
+        g_cl_dirty = 1;
     }
-    if (name && name[0]) snprintf(r->name, sizeof r->name, "%s", name);
+    if (name && name[0] && strcmp(r->name, name)) { snprintf(r->name, sizeof r->name, "%s", name); g_cl_dirty = 1; }
+    int had = r->naddr;
     rm_add_addr(r, ip);
+    if (r->naddr != had) g_cl_dirty = 1;
+    r->seen_at = (long long)time(NULL);
     return r;
 }
 
@@ -165,7 +174,7 @@ static int rm_pick(Remote *r) {
 }
 
 // ---------------------------------------------------------------- polling another PC
-typedef struct { char id[40], name[64]; int ndev; RDev dev[CL_MAXRD]; } PollResult;
+typedef struct { char id[40], name[64]; int hello; int ndev; RDev dev[CL_MAXRD]; } PollResult;
 
 static uint16_t cl_g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 static uint32_t cl_g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
@@ -186,6 +195,7 @@ static int poll_pc(const char *ip, PollResult *out) {
         plat_close(s);
         json_str(js, "name", out->name, sizeof out->name);
         json_str(js, "id", out->id, sizeof out->id);
+        out->hello = json_bool(js, "hello");
         const char *p = strstr(js, "\"devices\":[");
         while (p && out->ndev < CL_MAXRD && (p = strchr(p, '{'))) {
             const char *e = strchr(p, '}');
@@ -227,6 +237,41 @@ static int poll_pc(const char *ip, PollResult *out) {
     return 0;
 }
 
+// ---------------------------------------------------------------- finding each other without broadcasts
+// Announcements ("I'm here" broadcasts) often get lost on Wi-Fi and VPNs. So USBeam also:
+//   - introduces itself directly to every PC it reaches (OP_REQ_HELLO, only to USBeam versions that know it),
+//   - answers an announcement directly (at most every 30 s per PC),
+//   - remembers the PCs it has seen, and contacts them right after starting.
+static int disco_message(char *buf, int n);
+static void send_hello(const char *ip) {
+    char msg[128];
+    int len = disco_message(msg, sizeof msg);
+    if (len <= 0 || len >= (int)sizeof msg) return;
+    plat_sock s = plat_connect(ip, 1500);
+    if (s == PLAT_BAD_SOCK) return;
+    uint8_t h[8];
+    cl_op(h, OP_REQ_HELLO);
+    h[4] = (uint8_t)(len >> 24); h[5] = (uint8_t)(len >> 16); h[6] = (uint8_t)(len >> 8); h[7] = (uint8_t)len;
+    if (!plat_send(s, h, 8)) plat_send(s, msg, len);
+    plat_close(s);
+}
+static int disco_reply_due(const char *ip) {
+    static struct { char ip[64]; unsigned long long at; } t[32];
+    static int next;
+    unsigned long long now = now_ms();
+    cl_lock();
+    int due = 1;
+    for (int i = 0; i < 32; i++) if (t[i].ip[0] && !strcmp(t[i].ip, ip)) {
+        if (now < t[i].at + 30000) due = 0; else t[i].at = now;
+        cl_unlock();
+        return due;
+    }
+    int k = next++ % 32;
+    snprintf(t[k].ip, sizeof t[k].ip, "%s", ip); t[k].at = now;
+    cl_unlock();
+    return 1;
+}
+
 // ---------------------------------------------------------------- the client loop (once a second)
 static void client_save(void);
 static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max);
@@ -248,9 +293,11 @@ static void client_tick(void) {
     static PollResult pr;
     for (int i = 0; i < nip; i++) {
         int ok = poll_pc(ips[i], &pr) == 0;
+        int hello = 0;
         cl_lock();
         Remote *r = rm_by_ip(ips[i]);
         if (ok && pr.id[0]) r = remote_seen(pr.id, pr.name, ips[i]);
+        if (r && ok && pr.hello && now >= r->next_hello) { r->next_hello = now + 60000; hello = 1; }
         if (r) {
             for (int k = 0; k < r->naddr; k++) if (!strcmp(r->addr[k].ip, ips[i])) r->addr[k].ok = ok;
             if (ok && !pr.id[0] && pr.name[0] == 0 && !r->name[0]) snprintf(r->name, sizeof r->name, "%s", ips[i]);
@@ -265,10 +312,13 @@ static void client_tick(void) {
                     snprintf(u->pid, sizeof u->pid, "%s", r->dev[k].pid);
                 }
             }
-            if (r->via < 0) r->ndev = 0;
+            if (r->via < 0) { r->ndev = 0; r->next_poll = now + 15000; }   // unreachable: check less often (an announcement re-checks at once)
+            else if (r->next_poll > now + 2500) r->next_poll = now + 2500;
         }
         cl_unlock();
+        if (hello) send_hello(ips[i]);     // let it know this PC exists too (if its announcements never reach us)
     }
+    if (g_cl_dirty) { g_cl_dirty = 0; client_save(); }
     // 2. Devices used here: keep attached, release, retry.
     int any = 0;
     cl_lock();
@@ -370,13 +420,16 @@ static void client_release_all(void) {
 static int disco_message(char *buf, int n) {
     return snprintf(buf, (size_t)n, "USBEAM2\t%s\t%s", g_id, g_name);
 }
-static void disco_received(const char *msg, const char *ip) {
+// Returns 1 for a valid announcement from another PC.
+static int disco_received(const char *msg, const char *ip) {
     char id[40] = "", name[64] = "";
-    if (strncmp(msg, "USBEAM2\t", 8) || sscanf(msg + 8, "%32[^\t]\t%63[^\r\n]", id, name) < 1) return;
-    if (!strcmp(id, g_id)) return;
+    if (strncmp(msg, "USBEAM2\t", 8) || sscanf(msg + 8, "%32[^\t]\t%63[^\r\n]", id, name) < 1) return 0;
+    if (!strcmp(id, g_id)) return 0;
     cl_lock();
-    remote_seen(id, name, ip);
+    Remote *r = remote_seen(id, name, ip);
+    if (r) r->next_poll = 0;                 // check it right away
     cl_unlock();
+    return 1;
 }
 
 // ---------------------------------------------------------------- settings lines
@@ -388,6 +441,16 @@ static void client_save_lines(FILE *f) {
         if (g_r[i].id[0] && g_r[i].manual) for (int k = 0; k < g_r[i].naddr; k++) fprintf(f, "pc %s\n", g_r[i].addr[k].ip);
     for (int i = 0; i < CL_MAXW; i++)
         if (g_use[i].used && g_use[i].autorc) fprintf(f, "auto %s %s %s %d\n", g_boot_id, g_use[i].pc, g_use[i].busid, g_use[i].want);
+    long long now = (long long)time(NULL);
+    for (int i = 0; i < CL_MAXR; i++) {          // PCs seen in the last 30 days: contacted right after starting
+        Remote *r = &g_r[i];
+        if (!r->id[0] || !strncmp(r->id, "ip:", 3) || !r->naddr || (r->seen_at && now - r->seen_at > 30LL * 86400)) continue;
+        char nm[64]; snprintf(nm, sizeof nm, "%s", r->name);
+        for (char *c = nm; *c; c++) if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+        fprintf(f, "pcseen %s\t%lld\t%s\t", r->id, r->seen_at ? r->seen_at : now, nm);
+        for (int k = 0; k < r->naddr; k++) fprintf(f, "%s%s", k ? "," : "", r->addr[k].ip);
+        fprintf(f, "\n");
+    }
 }
 static int client_load_line(const char *line) {
     char a[64], b[64], c[64];
@@ -396,6 +459,19 @@ static int client_load_line(const char *line) {
         Remote *r = rm_by_ip(a);
         if (!r) { char id[40]; snprintf(id, sizeof id, "ip:%.36s", a); r = rm_new(id); }
         if (r) { rm_add_addr(r, a); r->manual = 1; }
+        return 1;
+    }
+    if (!strncmp(line, "pcseen ", 7)) {
+        char id[40] = "", nm[64] = "", ipl[400] = ""; long long seen = 0;
+        if (sscanf(line + 7, "%39[^\t]\t%lld\t%63[^\t]\t%399[^\r\n]", id, &seen, nm, ipl) == 4 && strcmp(id, g_id)) {
+            Remote *r = rm_find(id);
+            if (!r) r = rm_new(id);
+            if (r) {
+                if (!r->name[0]) snprintf(r->name, sizeof r->name, "%s", nm);
+                r->seen_at = seen;
+                for (char *ip = strtok(ipl, ","); ip; ip = strtok(NULL, ",")) rm_add_addr(r, ip);
+            }
+        }
         return 1;
     }
     int w = 0;

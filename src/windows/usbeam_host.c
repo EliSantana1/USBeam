@@ -864,7 +864,9 @@ static void urb_loop(Dev *d) {
 // ================================================================ connections
 #define OP_REQ_INFO 0x8FE1        // USBeam extension: device names and states as JSON
 #define OP_REP_INFO 0x0FE1
+#define OP_REQ_HELLO 0x8FE2       // USBeam extension: another PC introduces itself
 static void handle_info(SOCKET s);
+static void handle_hello(SOCKET s, const char *peer, const uint8_t *op);
 typedef struct { SOCKET s; char peer[64]; } Conn;
 
 static Dev *find_shared(const char *busid) {
@@ -883,6 +885,7 @@ static DWORD WINAPI conn_main(LPVOID arg) {
     uint16_t code = op[2] << 8 | op[3];
 
     if (code == OP_REQ_INFO) { handle_info(s); goto done; }
+    if (code == OP_REQ_HELLO) { handle_hello(s, c->peer, op); goto done; }
     if (code == OP_REQ_DEVLIST) {
         refresh_devices();
         EnterCriticalSection(&g_devs_cs);

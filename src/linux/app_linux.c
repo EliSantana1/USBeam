@@ -312,12 +312,22 @@ static void host_state(const char *busid, const char **state, const char **peer,
     else *state = "available";
 }
 
+// Another PC introduces itself ("USBEAM2\t<id>\t<name>"), as if its announcement had arrived.
+static void handle_hello(int s, const char *peer, const uint8_t *op) {
+    uint32_t len = (uint32_t)op[4] << 24 | (uint32_t)op[5] << 16 | (uint32_t)op[6] << 8 | op[7];
+    char buf[260];
+    if (len == 0 || len > 256 || recv_all(s, buf, len)) return;
+    buf[len] = 0;
+    disco_received(buf, peer);
+}
+
 static void handle_info(int s) {
     char ids[MAXH][32], name[256];
     int n = list_shareable(ids, MAXH);
     sb_t j = {0};
     sb_add(&j, "{\"name\":", 8); sb_jstr(&j, g_name);
     sb_add(&j, ",\"id\":", 6); sb_jstr(&j, g_id);
+    sb_add(&j, ",\"hello\":true", 13);           // this version understands OP_REQ_HELLO
     sb_add(&j, ",\"devices\":[", 12);
     int first = 1;
     for (int i = 0; i < n; i++) {
@@ -386,7 +396,11 @@ static void disco_receive(int us) {
     buf[n] = 0;
     char ip[64]; inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
     if (is_local_ip(ip) || !net_str_allowed(ip)) return;
-    disco_received(buf, ip);
+    if (disco_received(buf, ip) && disco_reply_due(ip)) {     // answer directly: one announcement getting through is enough
+        char msg[128]; int len = disco_message(msg, sizeof msg);
+        struct sockaddr_in to = from; to.sin_port = htons(DISCO_PORT);
+        if (len > 0) sendto(us, msg, (size_t)len, MSG_DONTWAIT, (struct sockaddr *)&to, sizeof to);
+    }
 }
 
 // Firewall (ufw, when it is switched on): open USBeam's ports only for the networks USBeam
@@ -619,6 +633,7 @@ static void *host_main(void *arg) {
                     host_lock();
                     if (code == OP_REQ_DEVLIST) handle_devlist(s, peer);
                     else if (code == OP_REQ_INFO) handle_info(s);
+                    else if (code == OP_REQ_HELLO) handle_hello(s, peer, op);
                     else if (code == OP_REQ_IMPORT) {
                         handle_import(s, peer);
                         struct timeval z = {0, 0};      // the kernel uses this connection now: no time limits
