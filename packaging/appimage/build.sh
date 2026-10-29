@@ -87,6 +87,21 @@ for f in platforms/libqwayland-generic.so wayland-shell-integration/libxdg-shell
 done
 ls "$APPDIR/usr/plugins/wayland-graphics-integration-client" || echo "(no Wayland graphics helpers: software drawing)"
 
+# Security modules the built-in web view loads at run time (for secure https:// connections, such
+# as checking for updates). The bundler doesn't see them; without them the computer's own, newer
+# copies get mixed with these older libraries and the window crashes.
+NSSDIR=$(dirname "$(readlink -f "$APPDIR/usr/lib/libnss3.so")")
+SYSNSS=$(dirname "$(ldconfig -p | awk '/libnss3.so / {print $NF; exit}')")
+for f in libsoftokn3.so libfreebl3.so libfreeblpriv3.so libnssckbi.so libnssdbm3.so libsoftokn3.chk libfreebl3.chk libfreeblpriv3.chk libnssdbm3.chk; do
+    src=$(find "$SYSNSS" "$SYSNSS/nss" -maxdepth 1 -name "$f" 2>/dev/null | head -n 1 || true)
+    if [ -n "$src" ]; then cp -L "$src" "$NSSDIR/$f"; fi
+done
+for f in libsoftokn3.so libfreeblpriv3.so libnssckbi.so; do
+    [ -f "$NSSDIR/$f" ] || { echo "ERROR: missing security module $f"; exit 1; }
+done
+./linuxdeploy --appdir "$APPDIR" --deploy-deps-only "$NSSDIR/libsoftokn3.so" --deploy-deps-only "$NSSDIR/libfreeblpriv3.so" --deploy-deps-only "$NSSDIR/libnssckbi.so"
+ls -la "$NSSDIR" | grep -E "nss|softokn|freebl"
+
 # The AppImage's own icon: real files (not links), which newer appimagetool versions require.
 rm -f "$APPDIR/usbeam.png" "$APPDIR/.DirIcon"
 cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/usbeam.png" "$APPDIR/usbeam.png"
