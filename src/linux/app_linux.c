@@ -88,6 +88,131 @@ static void plat_tune(void) { tune_drives(); }
 
 #include "../common/client.h"
 
+// ---------------------------------------------------------------- which networks USBeam may be used on
+// Linux has no shared idea of "home" vs "public" networks, so USBeam asks once per network
+// (in its window) and remembers the answer. ZeroTier and Tailscale are always allowed.
+static pthread_mutex_t g_nets_mx = PTHREAD_MUTEX_INITIALIZER;
+static void nets_lock(void) { pthread_mutex_lock(&g_nets_mx); }
+static void nets_unlock(void) { pthread_mutex_unlock(&g_nets_mx); }
+#include "../common/netpolicy.h"
+
+#define MAXTRUST 32
+static pthread_mutex_t g_trust_mx = PTHREAD_MUTEX_INITIALIZER;
+static char g_trust_id[MAXTRUST][96], g_trust_name[MAXTRUST][96];
+static int is_trusted(const char *id) {
+    int r = 0;
+    pthread_mutex_lock(&g_trust_mx);
+    for (int i = 0; i < MAXTRUST; i++) if (g_trust_id[i][0] && !strcmp(g_trust_id[i], id)) r = 1;
+    pthread_mutex_unlock(&g_trust_mx);
+    return r;
+}
+static void set_trusted(const char *id, const char *name, int on) {
+    pthread_mutex_lock(&g_trust_mx);
+    int done = 0;
+    for (int i = 0; i < MAXTRUST; i++) if (g_trust_id[i][0] && !strcmp(g_trust_id[i], id)) { if (!on) g_trust_id[i][0] = 0; done = 1; }
+    if (on && !done) for (int i = 0; i < MAXTRUST; i++) if (!g_trust_id[i][0]) {
+        snprintf(g_trust_id[i], sizeof g_trust_id[i], "%s", id);
+        snprintf(g_trust_name[i], sizeof g_trust_name[i], "%s", name && *name ? name : id);
+        for (char *c = g_trust_name[i]; *c; c++) if (*c == '\t' || *c == '\n') *c = ' ';
+        break;
+    }
+    pthread_mutex_unlock(&g_trust_mx);
+}
+
+// The default gateway of an interface (network byte order), 0 = none.
+static uint32_t if_gateway(const char *ifn) {
+    FILE *f = fopen("/proc/net/route", "r");
+    char line[256], name[32]; unsigned dest, gw, flags;
+    uint32_t r = 0;
+    while (f && fgets(line, sizeof line, f))
+        if (sscanf(line, "%31s %x %x %x", name, &dest, &gw, &flags) == 4 && !strcmp(name, ifn) && dest == 0 && gw) { r = gw; break; }
+    if (f) fclose(f);
+    return r;
+}
+// The gateway's hardware address (identifies "this" home network), "" if not known yet.
+static void gateway_mac(uint32_t gw, const char *ifn, char *out, size_t n) {
+    char ip[32], line[256], a[64], hw[64], dev[32]; unsigned t, fl;
+    struct in_addr ia; ia.s_addr = gw;
+    inet_ntop(AF_INET, &ia, ip, sizeof ip);
+    out[0] = 0;
+    FILE *f = fopen("/proc/net/arp", "r");
+    while (f && fgets(line, sizeof line, f))
+        if (sscanf(line, "%63s %x %x %63s %*s %31s", a, &t, &fl, hw, dev) == 5 && !strcmp(a, ip) && !strcmp(dev, ifn) && (fl & 2) && strcmp(hw, "00:00:00:00:00:00")) { snprintf(out, n, "%s", hw); break; }
+    if (f) fclose(f);
+    if (!out[0]) {                       // ask for it: any packet to the gateway makes Linux look it up
+        int u = socket(AF_INET, SOCK_DGRAM, 0);
+        if (u >= 0) {
+            struct sockaddr_in d = {0}; d.sin_family = AF_INET; d.sin_port = htons(9); d.sin_addr.s_addr = gw;
+            sendto(u, "", 0, MSG_DONTWAIT, (struct sockaddr *)&d, sizeof d);
+            close(u);
+        }
+    }
+}
+// A friendly name for the network on an interface: NetworkManager's connection name (often the Wi-Fi name).
+static void net_display_name(const char *ifn, uint32_t net, char *out, size_t n) {
+    static struct { char ifn[32]; uint32_t net; char name[96]; } cache[8];
+    static int next;
+    for (int i = 0; i < 8; i++) if (cache[i].ifn[0] && !strcmp(cache[i].ifn, ifn) && cache[i].net == net) { snprintf(out, n, "%s", cache[i].name); return; }
+    char cmd[128], name[96] = "";
+    int safe = 1;
+    for (const char *c = ifn; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_' && *c != '.') safe = 0;
+    if (safe) {
+        snprintf(cmd, sizeof cmd, "nmcli -t -g GENERAL.CONNECTION device show '%s' 2>/dev/null", ifn);
+        FILE *p = popen(cmd, "r");
+        if (p) { if (!fgets(name, sizeof name, p)) name[0] = 0; pclose(p); }
+        name[strcspn(name, "\r\n")] = 0;
+    }
+    if (!name[0] || !strcmp(name, "--")) snprintf(name, sizeof name, "%s", ifn);
+    int k = next++ % 8;
+    snprintf(cache[k].ifn, sizeof cache[k].ifn, "%s", ifn); cache[k].net = net;
+    snprintf(cache[k].name, sizeof cache[k].name, "%s", name);
+    snprintf(out, n, "%s", name);
+}
+
+static int plat_networks(NetInfo *out, int max) {
+    static struct { char ifn[32]; uint32_t net; int tries; } wait[8];
+    struct ifaddrs *ifs, *i;
+    int n = 0;
+    if (getifaddrs(&ifs)) return 0;
+    for (i = ifs; i && n < max; i = i->ifa_next) {
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !i->ifa_netmask) continue;
+        if ((i->ifa_flags & IFF_LOOPBACK) || !(i->ifa_flags & IFF_UP)) continue;
+        if (!strncmp(i->ifa_name, "docker", 6) || !strncmp(i->ifa_name, "br-", 3) || !strncmp(i->ifa_name, "virbr", 5) || !strncmp(i->ifa_name, "veth", 4)) continue;
+        uint32_t a = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
+        uint32_t m = ntohl(((struct sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr);
+        if ((a & 0xFFFF0000u) == 0xA9FE0000u) continue;                 // 169.254.x.x: no network
+        NetInfo *x = &out[n++];
+        memset(x, 0, sizeof *x);
+        x->net = a & m; x->mask = m; x->kind = NET_HOME;
+        if (!strncmp(i->ifa_name, "zt", 2)) x->kind = NET_ZT;
+        else if (!strncmp(i->ifa_name, "tailscale", 9) || (a & 0xFFC00000u) == 0x64400000u) x->kind = NET_TS;
+        int bits = 0; for (uint32_t k = m; k; k <<= 1) bits++;
+        char sub[40]; snprintf(sub, sizeof sub, "%u.%u.%u.%u/%d", x->net >> 24, (x->net >> 16) & 255, (x->net >> 8) & 255, x->net & 255, bits);
+        if (x->kind != NET_HOME) {
+            snprintf(x->id, sizeof x->id, "%s:%s", x->kind == NET_ZT ? "zerotier" : "tailscale", sub);
+            snprintf(x->name, sizeof x->name, "%s", x->kind == NET_ZT ? "ZeroTier" : "Tailscale");
+            x->allowed = 1;
+            continue;
+        }
+        // Wi-Fi / Ethernet: known by its address range + the hardware address of its router.
+        uint32_t gw = if_gateway(i->ifa_name);
+        char mac[64] = "";
+        if (gw) gateway_mac(gw, i->ifa_name, mac, sizeof mac);
+        if (gw && !mac[0]) {                    // still looking it up: wait a few seconds before asking
+            int w = -1, freeslot = -1;
+            for (int k = 0; k < 8; k++) { if (!strcmp(wait[k].ifn, i->ifa_name) && wait[k].net == x->net) w = k; if (!wait[k].ifn[0] && freeslot < 0) freeslot = k; }
+            if (w < 0) { w = freeslot >= 0 ? freeslot : 0; snprintf(wait[w].ifn, sizeof wait[w].ifn, "%s", i->ifa_name); wait[w].net = x->net; wait[w].tries = 0; }
+            if (++wait[w].tries <= 3) { x->pending = 1; snprintf(x->id, sizeof x->id, "%s@?", sub); snprintf(x->name, sizeof x->name, "%s", i->ifa_name); continue; }
+            struct in_addr ga; ga.s_addr = gw; inet_ntop(AF_INET, &ga, mac, sizeof mac);   // no answer: use the router's address
+        }
+        snprintf(x->id, sizeof x->id, "%s@%s", sub, gw ? mac : i->ifa_name);
+        net_display_name(i->ifa_name, x->net, x->name, sizeof x->name);
+        x->allowed = is_trusted(x->id);
+    }
+    freeifaddrs(ifs);
+    return n;
+}
+
 // ---------------------------------------------------------------- settings
 static void save_settings(void) {
     host_lock();
@@ -98,6 +223,9 @@ static void save_settings(void) {
     fprintf(f, "id %s\n", g_id);
     for (int i = 0; i < MAXHIDE; i++) if (g_hidden[i][0]) fprintf(f, "hide %s\n", g_hidden[i]);
     for (int i = 0; i < MAXHIDE; i++) if (g_shared[i][0]) fprintf(f, "share %s\n", g_shared[i]);
+    pthread_mutex_lock(&g_trust_mx);
+    for (int i = 0; i < MAXTRUST; i++) if (g_trust_id[i][0]) fprintf(f, "trustnet %s\t%s\n", g_trust_id[i], g_trust_name[i]);
+    pthread_mutex_unlock(&g_trust_mx);
     cl_lock();
     client_save_lines(f);
     cl_unlock();
@@ -114,6 +242,10 @@ static void load_settings(void) {
         if (sscanf(line, "id %32s", a) == 1) snprintf(g_id, sizeof g_id, "%s", a);
         else if (sscanf(line, "hide %63s", a) == 1) set_hidden(a, 1);
         else if (sscanf(line, "share %63s", a) == 1) set_shared(a, 1);
+        else if (!strncmp(line, "trustnet ", 9)) {
+            char tid[96] = "", tname[96] = "";
+            if (sscanf(line + 9, "%95[^\t\n]\t%95[^\n]", tid, tname) >= 1) set_trusted(tid, tname, 1);
+        }
         else client_load_line(line);
     }
     fclose(f);
@@ -187,6 +319,7 @@ static void disco_announce(int us) {
     for (i = ifs; i; i = i->ifa_next) {
         if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_BROADCAST) || !i->ifa_broadaddr) continue;
         if ((i->ifa_flags & IFF_LOOPBACK) || !(i->ifa_flags & IFF_UP) || !(i->ifa_flags & IFF_RUNNING)) continue;
+        if (!net_ip_allowed(ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr))) continue;   // not a network USBeam is used on
         struct sockaddr_in b = *(struct sockaddr_in *)i->ifa_broadaddr;
         b.sin_port = htons(DISCO_PORT);
         // Never wait: if a network can't take the message right now, skip it (next try in 3 s).
@@ -201,47 +334,55 @@ static void disco_receive(int us) {
     if (n <= 8) return;
     buf[n] = 0;
     char ip[64]; inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
-    if (is_local_ip(ip)) return;
+    if (is_local_ip(ip) || !net_str_allowed(ip)) return;
     disco_received(buf, ip);
 }
 
-// Allow USBeam through ufw for the local networks this PC is on (private addresses only).
-static void firewall_setup(void) {
+// Firewall (ufw, when it is switched on): open USBeam's ports only for the networks USBeam
+// may be used on, and remove rules USBeam added earlier for other networks.
+static void firewall_sync(void) {
     if (system("command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'") != 0) return;
-    struct ifaddrs *ifs, *i;
-    if (getifaddrs(&ifs)) return;
-    for (i = ifs; i; i = i->ifa_next) {
-        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !i->ifa_netmask || (i->ifa_flags & IFF_LOOPBACK)) continue;
-        uint32_t a = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
-        uint32_t m = ntohl(((struct sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr);
-        int priv = (a >> 24) == 10 || (a >> 20) == 0xAC1 || (a >> 16) == 0xC0A8;
-        if (!priv) continue;
-        int bits = 0; for (uint32_t x = m; x; x <<= 1) bits++;
-        struct in_addr net; net.s_addr = htonl(a & m);
-        char ns[32]; inet_ntop(AF_INET, &net, ns, sizeof ns);
-        char cmd[256];
-        snprintf(cmd, sizeof cmd, "ufw allow from %s/%d to any port 3240 proto tcp comment USBeam >/dev/null 2>&1", ns, bits);
-        if (system(cmd) != 0) logm("Could not add firewall rule for %s/%d", ns, bits);
-        snprintf(cmd, sizeof cmd, "ufw allow from %s/%d to any port 3241 proto udp comment USBeam >/dev/null 2>&1", ns, bits);
-        if (system(cmd) != 0) logm("Could not add firewall rule for %s/%d", ns, bits);
+    char want[MAXNETS][40]; int nw = 0;
+    nets_lock();
+    for (int i = 0; i < g_nnets && nw < MAXNETS; i++) {
+        NetInfo *x = &g_nets[i];
+        if (!x->allowed) continue;
+        int bits = 0; for (uint32_t m = x->mask; m; m <<= 1) bits++;
+        char r[40];
+        if (x->kind == NET_TS) snprintf(r, sizeof r, "100.64.0.0/10");
+        else snprintf(r, sizeof r, "%u.%u.%u.%u/%d", x->net >> 24, (x->net >> 16) & 255, (x->net >> 8) & 255, x->net & 255, bits);
+        int dup = 0; for (int k = 0; k < nw; k++) if (!strcmp(want[k], r)) dup = 1;
+        if (!dup) snprintf(want[nw++], 40, "%s", r);
     }
-    freeifaddrs(ifs);
-    logm("Firewall (ufw): USBeam allowed from this PC's local networks");
-}
-
-// A fingerprint of this PC's private networks, to notice one appearing later (ZeroTier after boot).
-static unsigned long nets_signature(void) {
-    struct ifaddrs *ifs, *i;
-    unsigned long sig = 0;
-    if (getifaddrs(&ifs)) return 0;
-    for (i = ifs; i; i = i->ifa_next) {
-        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !i->ifa_netmask || (i->ifa_flags & IFF_LOOPBACK)) continue;
-        uint32_t a = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
-        uint32_t m = ntohl(((struct sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr);
-        sig += (unsigned long)((a & m) * 2654435761u) ^ m;
+    nets_unlock();
+    char cmd[256];
+    // Remove USBeam's rules for networks that are no longer allowed.
+    FILE *p = popen("ufw status 2>/dev/null", "r");
+    char line[512], have[64][40]; int nh = 0;
+    while (p && fgets(line, sizeof line, p) && nh < 64) {
+        if (!strstr(line, "# USBeam") || strncmp(line, "3240/tcp", 8)) continue;
+        char t1[64], t2[64], t3[64], t4[64];
+        int k = sscanf(line, "%63s %63s %63s %63s", t1, t2, t3, t4);
+        const char *from = (k >= 4 && !strcmp(t3, "IN")) ? t4 : t3;
+        if (k >= 3 && strchr(from, '.')) snprintf(have[nh++], 40, "%s", from);
     }
-    freeifaddrs(ifs);
-    return sig;
+    if (p) pclose(p);
+    for (int h = 0; h < nh; h++) {
+        int keep = 0;
+        for (int k = 0; k < nw; k++) if (!strcmp(have[h], want[k])) keep = 1;
+        if (keep) continue;
+        snprintf(cmd, sizeof cmd, "ufw delete allow from %s to any port 3240 proto tcp >/dev/null 2>&1", have[h]);
+        if (system(cmd) != 0) logm("Could not remove firewall rule for %s", have[h]);
+        snprintf(cmd, sizeof cmd, "ufw delete allow from %s to any port 3241 proto udp >/dev/null 2>&1", have[h]);
+        if (system(cmd) != 0) logm("Could not remove firewall rule for %s", have[h]);
+    }
+    for (int k = 0; k < nw; k++) {
+        snprintf(cmd, sizeof cmd, "ufw allow from %s to any port 3240 proto tcp comment USBeam >/dev/null 2>&1", want[k]);
+        if (system(cmd) != 0) logm("Could not add firewall rule for %s", want[k]);
+        snprintf(cmd, sizeof cmd, "ufw allow from %s to any port 3241 proto udp comment USBeam >/dev/null 2>&1", want[k]);
+        if (system(cmd) != 0) logm("Could not add firewall rule for %s", want[k]);
+    }
+    logm("Firewall (ufw): USBeam allowed on %d network(s)", nw);
 }
 
 // ---------------------------------------------------------------- app window API
@@ -272,7 +413,19 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         sb_printf(out, "%s", "{\"os\":\"linux\",\"name\":"); sb_jstr(out, g_name);
         sb_printf(out, "%s", ","); add_local_json(out);
         sb_printf(out, "%s", ","); client_json(out);
-        sb_printf(out, "%s", "}");
+        sb_printf(out, "%s", ","); nets_json(out);
+        sb_add(out, ",\"trusted\":[", 12);
+        pthread_mutex_lock(&g_trust_mx);
+        int tf = 1;
+        for (int i = 0; i < MAXTRUST; i++) if (g_trust_id[i][0]) {
+            if (!tf) sb_add(out, ",", 1);
+            tf = 0;
+            sb_add(out, "{\"id\":", 6); sb_jstr(out, g_trust_id[i]);
+            sb_add(out, ",\"name\":", 8); sb_jstr(out, g_trust_name[i]);
+            sb_add(out, "}", 1);
+        }
+        pthread_mutex_unlock(&g_trust_mx);
+        sb_printf(out, "%s", "]}");
         return 200;
     }
     if (strcmp(method, "POST") || strcmp(path, "/api/action")) return 404;
@@ -282,7 +435,22 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     HostDev *h = id[0] ? hdev(id, 0) : NULL;
     int code = 200;
 
+    char nid[96] = "";
+    json_str(body, "net", nid, sizeof nid);
     if (!strcmp(op, "forget_auto")) { client_forget_auto(); }
+    else if (!strcmp(op, "net_allow") || !strcmp(op, "net_forget")) {
+        int on = !strcmp(op, "net_allow");
+        char nname[96] = "";
+        nets_lock();
+        for (int i = 0; i < g_nnets; i++) if (!strcmp(g_nets[i].id, nid)) snprintf(nname, sizeof nname, "%s", g_nets[i].name);
+        nets_unlock();
+        if (on && (!nid[0] || strchr(nid, '?'))) { sb_printf(out, "%s", "{\"error\":\"This network is still being identified. Try again in a few seconds.\"}"); return 400; }
+        set_trusted(nid, nname, on);
+        save_settings();
+        nets_refresh();                         // takes effect now; the firewall follows within 3 s
+        logm("Network %s: USBeam %s", nname[0] ? nname : nid, on ? "allowed" : "no longer allowed");
+    }
+    else if (!strcmp(op, "net_later")) { if (nid[0]) nets_later(nid); }
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); g_stop = 1; }
     else if (!strcmp(op, "local_cancel")) { if (h && h->hold_until) { h->hold_until = 0; h->blocked = 1; logm("[%s] reconnect cancelled", id); } }
     else if (!strcmp(op, "local_allow")) { if (h) { h->blocked = 0; h->hold_until = 0; } }
@@ -381,6 +549,7 @@ static void *host_main(void *arg) {
         if (poll(&pf, 1, 250) > 0 && (pf.revents & POLLIN)) {
             struct sockaddr_in ca; socklen_t cl = sizeof ca;
             int s = accept(ls, (struct sockaddr *)&ca, &cl);
+            if (s >= 0 && !net_ip_allowed(ntohl(ca.sin_addr.s_addr))) { close(s); s = -1; }   // not a network USBeam is used on
             if (s >= 0) {
                 char peer[64]; inet_ntop(AF_INET, &ca.sin_addr, peer, sizeof peer);
                 setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -419,17 +588,17 @@ static void *host_main(void *arg) {
 // up to date when a network appears later (for example ZeroTier after boot).
 static void *disco_main(void *arg) {
     int us = (int)(intptr_t)arg;
-    time_t next_announce = 0, next_fw = 0;
+    time_t next_announce = 0;
     unsigned long sig = 0;
     while (!g_stop) {
         struct pollfd pf = { us, POLLIN, 0 };
         if (poll(&pf, 1, 500) > 0 && (pf.revents & POLLIN)) disco_receive(us);
         time_t now = time(NULL);
-        if (now >= next_announce) { disco_announce(us); next_announce = now + 3; }
-        if (now >= next_fw) {
-            next_fw = now + 10;
-            unsigned long s2 = nets_signature();
-            if (s2 != sig) { sig = s2; if (!g_uitest) firewall_setup(); }
+        if (now >= next_announce) {
+            unsigned long s2 = nets_refresh();          // networks come and go (Wi-Fi, ZeroTier after boot...)
+            if (s2 != sig) { sig = s2; if (!g_uitest) firewall_sync(); }
+            disco_announce(us);
+            next_announce = now + 3;
         }
     }
     return NULL;
@@ -471,6 +640,7 @@ static int cmd_app(int service) {
     int uis = ui_listen();
     if (uis < 0) { printf("Cannot use local port %d for the app window. Is USBeam already running?\n", UI_PORT); return 1; }
 
+    nets_refresh();          // which networks USBeam may be used on
     write_token_file();
     g_uitest = uitest;
     pthread_t ct, ht, dt;

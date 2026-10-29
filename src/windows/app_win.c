@@ -5,6 +5,8 @@
 // settings, reconnect countdowns, the client side (via the usbip-win2 driver),
 // automatic discovery, firewall setup and the app window (local web UI).
 
+#define COBJMACROS
+#include <netlistmgr.h>
 #include "../common/http.h"
 #include "../common/client_types.h"
 #include "ui_html.h"
@@ -18,6 +20,7 @@ static char g_cfg_path[MAX_PATH];
 static wchar_t g_usbip_exe[MAX_PATH];
 static HANDLE g_quit_event;
 static CRITICAL_SECTION g_cl_cs;          // remote PCs + devices in use from them
+static CRITICAL_SECTION g_nets_cs;        // this PC's networks (netpolicy.h)
 
 static void w2u(const wchar_t *w, char *out, int n) { WideCharToMultiByte(CP_UTF8, 0, w, -1, out, n, NULL, NULL); }
 
@@ -76,6 +79,104 @@ static const char *plat_client_note(void);
 static void plat_tune(void) {}
 
 #include "../common/client.h"
+
+// ---------------------------------------------------------------- which networks USBeam may be used on
+static void nets_lock(void) { EnterCriticalSection(&g_nets_cs); }
+static void nets_unlock(void) { LeaveCriticalSection(&g_nets_cs); }
+#include "../common/netpolicy.h"
+
+// Windows' own Private / Public setting for each connected network (Network List Manager).
+// COM is loaded on demand so USBeam needs no extra libraries.
+typedef HRESULT (WINAPI *CoInitEx_t)(LPVOID, DWORD);
+typedef HRESULT (WINAPI *CoCreate_t)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID *);
+typedef void (WINAPI *SysFree_t)(BSTR);
+typedef struct { char guid[40]; int cat; char name[96]; } NlmEntry;
+
+static int nlm_list(NlmEntry *e, int max) {              // -1 = can't tell
+    static CoInitEx_t pCoInitializeEx; static CoCreate_t pCoCreateInstance; static SysFree_t pSysFreeString;
+    static int loaded;
+    static _Thread_local int co;
+    if (!loaded) {
+        loaded = 1;
+        HMODULE o = LoadLibraryW(L"ole32.dll"), a = LoadLibraryW(L"oleaut32.dll");
+        pCoInitializeEx = o ? (CoInitEx_t)(void *)GetProcAddress(o, "CoInitializeEx") : NULL;
+        pCoCreateInstance = o ? (CoCreate_t)(void *)GetProcAddress(o, "CoCreateInstance") : NULL;
+        pSysFreeString = a ? (SysFree_t)(void *)GetProcAddress(a, "SysFreeString") : NULL;
+    }
+    if (!pCoInitializeEx || !pCoCreateInstance || !pSysFreeString) return -1;
+    if (!co) { co = 1; pCoInitializeEx(NULL, COINIT_MULTITHREADED); }
+    INetworkListManager *m = NULL;
+    if (FAILED(pCoCreateInstance(&CLSID_NetworkListManager, NULL, CLSCTX_ALL, &IID_INetworkListManager, (void **)&m)) || !m) return -1;
+    IEnumNetworkConnections *en = NULL;
+    int n = 0;
+    if (SUCCEEDED(INetworkListManager_GetNetworkConnections(m, &en)) && en) {
+        INetworkConnection *c = NULL; ULONG got = 0;
+        while (n < max && IEnumNetworkConnections_Next(en, 1, &c, &got) == S_OK && got && c) {
+            GUID g; INetwork *net = NULL;
+            if (SUCCEEDED(INetworkConnection_GetAdapterId(c, &g)) && SUCCEEDED(INetworkConnection_GetNetwork(c, &net)) && net) {
+                NLM_NETWORK_CATEGORY cat = NLM_NETWORK_CATEGORY_PUBLIC;
+                INetwork_GetCategory(net, &cat);
+                BSTR nm = NULL;
+                INetwork_GetName(net, &nm);
+                snprintf(e[n].guid, sizeof e[n].guid, "{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                         (unsigned long)g.Data1, g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+                         g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+                e[n].cat = (int)cat;
+                e[n].name[0] = 0;
+                if (nm) { w2u(nm, e[n].name, sizeof e[n].name); pSysFreeString(nm); }
+                n++;
+                INetwork_Release(net);
+            }
+            INetworkConnection_Release(c);
+            c = NULL;
+        }
+        IEnumNetworkConnections_Release(en);
+    }
+    INetworkListManager_Release(m);
+    return n;
+}
+
+static int plat_networks(NetInfo *out, int max) {
+    NlmEntry nl[MAXNETS];
+    int nn = nlm_list(nl, MAXNETS);
+    ULONG sz = 32768;
+    IP_ADAPTER_ADDRESSES *aa = malloc(sz);
+    int n = 0;
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG rc = aa ? GetAdaptersAddresses(AF_INET, flags, NULL, aa, &sz) : ERROR_NOT_ENOUGH_MEMORY;
+    if (rc == ERROR_BUFFER_OVERFLOW) { free(aa); aa = malloc(sz); rc = aa ? GetAdaptersAddresses(AF_INET, flags, NULL, aa, &sz) : ERROR_NOT_ENOUGH_MEMORY; }
+    if (rc == NO_ERROR) {
+        for (IP_ADAPTER_ADDRESSES *a = aa; a && n < max; a = a->Next) {
+            if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+            int kind = NET_HOME;
+            if (wcsstr(a->Description, L"ZeroTier") || wcsstr(a->FriendlyName, L"ZeroTier")) kind = NET_ZT;
+            else if (wcsstr(a->Description, L"Tailscale") || wcsstr(a->FriendlyName, L"Tailscale")) kind = NET_TS;
+            else if (wcsstr(a->Description, L"Hyper-V") || wcsstr(a->FriendlyName, L"vEthernet") || wcsstr(a->Description, L"VirtualBox") || wcsstr(a->Description, L"VMware")) continue;
+            int cat = -1; char nname[96] = "";
+            for (int k = 0; k < nn; k++) if (!_stricmp(nl[k].guid, a->AdapterName)) { cat = nl[k].cat; snprintf(nname, sizeof nname, "%s", nl[k].name); }
+            for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u && n < max; u = u->Next) {
+                uint32_t ip = ntohl(((struct sockaddr_in *)u->Address.lpSockaddr)->sin_addr.s_addr);
+                if ((ip & 0xFFFF0000u) == 0xA9FE0000u) continue;            // 169.254.x.x: no network
+                uint32_t m = u->OnLinkPrefixLength ? 0xFFFFFFFFu << (32 - u->OnLinkPrefixLength) : 0;
+                NetInfo *x = &out[n++];
+                memset(x, 0, sizeof *x);
+                x->kind = (ip & 0xFFC00000u) == 0x64400000u ? NET_TS : kind;
+                x->net = ip & m; x->mask = m;
+                snprintf(x->id, sizeof x->id, "%s", a->AdapterName);
+                if (x->kind == NET_ZT) snprintf(x->name, sizeof x->name, "ZeroTier");
+                else if (x->kind == NET_TS) snprintf(x->name, sizeof x->name, "Tailscale");
+                else if (nname[0]) snprintf(x->name, sizeof x->name, "%s", nname);
+                else w2u(a->FriendlyName, x->name, sizeof x->name);
+                if (x->kind != NET_HOME) x->allowed = 1;                    // the user's own private networks
+                else if (nn < 0) x->allowed = 1;                            // can't tell: the firewall still decides
+                else if (cat == NLM_NETWORK_CATEGORY_PRIVATE || cat == NLM_NETWORK_CATEGORY_DOMAIN_AUTHENTICATED) x->allowed = 1;
+                else x->pub = 1;
+            }
+        }
+    }
+    free(aa);
+    return n;
+}
 
 // ---------------------------------------------------------------- settings file
 static void save_config(void) {
@@ -310,6 +411,7 @@ static void disco_announce(SOCKET us) {
             if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
             for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u; u = u->Next) {
                 struct sockaddr_in *sin = (struct sockaddr_in *)u->Address.lpSockaddr;
+                if (!net_ip_allowed(ntohl(sin->sin_addr.s_addr))) continue;     // not a network USBeam is used on
                 ULONG mask = u->OnLinkPrefixLength ? htonl(0xFFFFFFFFu << (32 - u->OnLinkPrefixLength)) : 0;
                 struct sockaddr_in b = *sin;
                 b.sin_addr.s_addr = sin->sin_addr.s_addr | ~mask;
@@ -319,6 +421,27 @@ static void disco_announce(SOCKET us) {
         }
     }
     free(aa);
+}
+
+static void firewall_sync(void);
+
+// The ZeroTier / Tailscale address ranges this PC is on (for the firewall), e.g. "10.0.0.0/24,100.64.0.0/10".
+static void vpn_ranges(char *out, size_t n) {
+    out[0] = 0;
+    nets_lock();
+    for (int i = 0; i < g_nnets; i++) {
+        NetInfo *x = &g_nets[i];
+        if (x->kind == NET_HOME) continue;
+        char r[40];
+        if (x->kind == NET_TS) snprintf(r, sizeof r, "100.64.0.0/10");
+        else { int bits = 0; for (uint32_t m = x->mask; m; m <<= 1) bits++;
+               snprintf(r, sizeof r, "%u.%u.%u.%u/%d", x->net >> 24, (x->net >> 16) & 255, (x->net >> 8) & 255, x->net & 255, bits); }
+        if (strstr(out, r)) continue;
+        if (strlen(out) + strlen(r) + 2 >= n) break;
+        if (out[0]) strcat(out, ",");
+        strcat(out, r);
+    }
+    nets_unlock();
 }
 
 static DWORD WINAPI disco_main(LPVOID arg) {
@@ -336,15 +459,22 @@ static DWORD WINAPI disco_main(LPVOID arg) {
     u_long nb = 1; ioctlsocket(snd, FIONBIO, &nb);
     setsockopt(snd, SOL_SOCKET, SO_BROADCAST, (char *)&one, sizeof one);
     ULONGLONG next = 0;
+    char fw_done[1024] = "-";
     for (;;) {
         if (WaitForSingleObject(g_quit_event, 0) == WAIT_OBJECT_0) break;
-        if (GetTickCount64() >= next) { disco_announce(snd); next = GetTickCount64() + 3000; }
+        if (GetTickCount64() >= next) {
+            nets_refresh();                      // networks come and go (Wi-Fi, ZeroTier after boot...)
+            char vr[1024]; vpn_ranges(vr, sizeof vr);
+            if (strcmp(vr, fw_done)) { snprintf(fw_done, sizeof fw_done, "%s", vr); firewall_sync(); }
+            disco_announce(snd);
+            next = GetTickCount64() + 3000;
+        }
         char buf[128]; struct sockaddr_in from; int fl = sizeof from;
         int n = recvfrom(us, buf, sizeof buf - 1, 0, (struct sockaddr *)&from, &fl);
         if (n <= 8) continue;
         buf[n] = 0;
         char ip[64]; inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
-        if (is_local_ip(ip)) continue;
+        if (is_local_ip(ip) || !net_str_allowed(ip)) continue;
         disco_received(buf, ip);
     }
     closesocket(us);
@@ -352,16 +482,26 @@ static DWORD WINAPI disco_main(LPVOID arg) {
     return 0;
 }
 
-// Let other PCs on the local network reach USBeam (USB/IP 3240/tcp, discovery 3241/udp).
-static void firewall_setup(void) {
-    wchar_t netsh[MAX_PATH], exe[MAX_PATH], args[1024];
+// Firewall: other PCs may reach USBeam (USB/IP 3240/tcp, discovery 3241/udp) only
+//   - on Wi-Fi / Ethernet networks Windows marks Private (or work/domain), never Public;
+//   - on ZeroTier / Tailscale (often marked Public by Windows), but only from their own addresses.
+static void firewall_sync(void) {
+    wchar_t netsh[MAX_PATH], exe[MAX_PATH], args[2048];
     GetSystemDirectoryW(netsh, MAX_PATH); wcscat(netsh, L"\\netsh.exe");
     GetModuleFileNameW(NULL, exe, MAX_PATH);
-    run_hidden(netsh, L"advfirewall firewall delete rule name=\"USBeam\"", NULL, 0, 10000);   // refresh: the program path may have changed
-    _snwprintf(args, 1024, L"advfirewall firewall add rule name=\"USBeam\" dir=in action=allow program=\"%ls\" remoteip=localsubnet enable=yes profile=any", exe);
-    args[1023] = 0;
+    run_hidden(netsh, L"advfirewall firewall delete rule name=\"USBeam\"", NULL, 0, 10000);
+    run_hidden(netsh, L"advfirewall firewall delete rule name=\"USBeam (ZeroTier/Tailscale)\"", NULL, 0, 10000);
+    _snwprintf(args, 2048, L"advfirewall firewall add rule name=\"USBeam\" dir=in action=allow program=\"%ls\" remoteip=localsubnet enable=yes profile=private,domain", exe);
+    args[2047] = 0;
     int r = run_hidden(netsh, args, NULL, 0, 10000);
-    logm("Firewall rule for USBeam: %s", r == 0 ? "added" : "could not be added");
+    char vr[1024]; vpn_ranges(vr, sizeof vr);
+    int r2 = 0;
+    if (vr[0]) {
+        _snwprintf(args, 2048, L"advfirewall firewall add rule name=\"USBeam (ZeroTier/Tailscale)\" dir=in action=allow program=\"%ls\" remoteip=%hs enable=yes profile=any", exe, vr);
+        args[2047] = 0;
+        r2 = run_hidden(netsh, args, NULL, 0, 10000);
+    }
+    logm("Firewall: USBeam allowed on Private networks%s%s (%s)", vr[0] ? " and " : "", vr, (r == 0 && r2 == 0) ? "ok" : "could not be fully set");
 }
 
 // ---------------------------------------------------------------- app window API
@@ -400,6 +540,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         sb_printf(out, "%s", "{\"os\":\"windows\",\"name\":"); sb_jstr(out, g_name);
         sb_add(out, ",", 1); add_local_json(out);
         sb_add(out, ",", 1); client_json(out);
+        sb_add(out, ",", 1); nets_json(out);
         sb_add(out, "}", 1);
         return 200;
     }
@@ -412,6 +553,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
 
     if (!strcmp(op, "forget_auto")) { client_forget_auto(); }
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); SetEvent(g_quit_event); }
+    else if (!strcmp(op, "net_later")) { char nid[96]; json_str(body, "net", nid, sizeof nid); if (nid[0]) nets_later(nid); }
     else if (!strcmp(op, "local_cancel")) { if (d && d->hold_until) { d->hold_until = 0; d->blocked = 1; say("[%s] reconnect cancelled: %ls stays on this PC", d->busid, d->name); } }
     else if (!strcmp(op, "local_allow")) { if (d) { d->blocked = 0; d->hold_until = 0; } }
     else if (!strcmp(op, "local_hide")) { if (d) { d->hidden = 1; d->share_forced = 0; save_config(); } }
@@ -480,6 +622,7 @@ static int engine_run(void) {
     InitializeCriticalSection(&g_devs_cs);
     InitializeCriticalSection(&g_hubdesc_cs);
     InitializeCriticalSection(&g_cl_cs);
+    InitializeCriticalSection(&g_nets_cs);
     g_quit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     wchar_t pd[MAX_PATH];
@@ -525,7 +668,7 @@ static int engine_run(void) {
         Dev *d = &g_devs[i];
         if (d->used && d->present && d->on_winusb) { say("Returning %ls to this PC (was left on the sharing driver).", d->name); revert_driver(d); }
     }
-    firewall_setup();
+    nets_refresh();          // which networks USBeam may be used on (the firewall is set by the discovery thread)
 
     CloseHandle(CreateThread(NULL, 0, server_main, (LPVOID)(uintptr_t)ls, 0, NULL));
     CloseHandle(CreateThread(NULL, 0, monitor_main, NULL, 0, NULL));

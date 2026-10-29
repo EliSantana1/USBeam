@@ -69,6 +69,12 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
 .noact { min-width: 92px; text-align: center; font-size: 12px; color: var(--muted); }
 .empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 12px; padding: 28px; text-align: center; color: var(--muted); }
 .note { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; color: var(--muted); }
+.netnote { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; }
+.netnote .txt { flex: 1 1 320px; min-width: 0; }
+.netnote .txt b { font-weight: 600; }
+.netnote .txt div { font-size: 12px; color: var(--muted); }
+.netnote .acts { display: flex; gap: 8px; }
+h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 10px; }
 .addpc { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .addpc input { flex: 0 1 280px; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -100,6 +106,7 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
     </nav>
     <section id="view-net">
       <p class="hint" id="nethint"></p>
+      <div id="netnotes"></div>
       <div id="pcs"></div>
       <div class="addpc">
         <label for="addr" class="sr">PC address</label>
@@ -111,6 +118,7 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
       <p class="hint">Devices plugged into this PC. They keep working here until another PC starts using them, and come back here when it lets go.</p>
       <p class="hint">Closing this window keeps USBeam running. Open it again from its tray icon.</p>
       <div class="box" id="local"></div>
+      <div id="trusted"></div>
     </section>
   </div>
 </main>
@@ -118,7 +126,7 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
 const params = new URLSearchParams(location.search);
 const token = params.get('t') || '';
 if (params.get('theme') === 'dark' || params.get('theme') === 'light') document.documentElement.dataset.theme = params.get('theme');
-let tab = 'net', busy = false, lastPcs = '', lastLocal = '', lastNets = '';
+let tab = 'net', busy = false, lastPcs = '', lastLocal = '', lastNets = '', lastNetInfo = '';
 const ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v14M8 7l4-4 4 4M7 12h2v3M17 10h-2v3"></path><circle cx="12" cy="19" r="2"></circle></svg>';
 const PCICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" style="color:var(--muted)"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg>';
 
@@ -142,7 +150,7 @@ async function act(body) {
     banner(!r.ok || j.error ? (j.error || 'Something went wrong (' + r.status + ').') : '');
   } catch (e) { banner('USBeam is not responding.'); }
   busy = false;
-  lastPcs = lastLocal = '';
+  lastPcs = lastLocal = lastNetInfo = '';
   refresh();
 }
 document.addEventListener('click', e => {
@@ -193,6 +201,36 @@ function renderPcs(s) {
   }
   document.getElementById('pcs').innerHTML = html;
 }
+// Networks USBeam is switched off on (not trusted / marked Public), and on Linux the allowed list.
+function renderNetInfo(s) {
+  const nets = s.networks || [];
+  let html = '';
+  for (const n of nets) {
+    if (n.allowed || n.pending || n.later || n.kind !== 'home') continue;
+    const later = `<button class="btn" data-act="${attr({ op: 'net_later', net: n.id })}">Not now</button>`;
+    if (s.os === 'linux') {
+      html += `<div class="netnote"><div class="txt"><b>USBeam is off on “${esc(n.name)}”.</b>
+        <div>Other PCs can't see or use this PC on this network (${esc(n.subnet)}), and it doesn't look for them. Allow it only on networks you trust, like your home or office.</div></div>
+        <div class="acts"><button class="btn primary" data-act="${attr({ op: 'net_allow', net: n.id })}">Allow</button>${later}</div></div>`;
+    } else {
+      html += `<div class="netnote"><div class="txt"><b>USBeam is off on “${esc(n.name)}” because Windows marks it as a Public network.</b>
+        <div>If you trust this network, like your home or office, make it Private: Windows Settings → Network &amp; internet → Wi-Fi (or Ethernet) → ${esc(n.name)} → Private network.</div></div>
+        <div class="acts">${later}</div></div>`;
+    }
+  }
+  document.getElementById('netnotes').innerHTML = html;
+  let t = '';
+  if (s.os === 'linux') {
+    const tr = s.trusted || [];
+    t = '<h2 class="sub">Networks USBeam is allowed on</h2>';
+    t += '<p class="hint">ZeroTier and Tailscale are always allowed. Other networks are allowed only after you choose Allow on them.</p>';
+    if (tr.length) t += '<div class="box">' + tr.map(x => `<div class="row"><div class="dinfo"><div class="dname">${esc(x.name)}</div><div class="dsub">${esc(x.id)}</div></div>
+        <button class="btn" data-act="${attr({ op: 'net_forget', net: x.id })}">Remove</button></div>`).join('') + '</div>';
+  } else {
+    t = '<h2 class="sub">Networks</h2><p class="hint">USBeam works on networks Windows marks as Private, and always on ZeroTier and Tailscale. It stays off on Public networks such as cafés, hotels and airports.</p>';
+  }
+  document.getElementById('trusted').innerHTML = t;
+}
 function renderLocal(list) {
   const el = document.getElementById('local');
   if (!list.length) { el.innerHTML = '<div class="row"><span class="dsub">No USB devices found.</span></div>'; return; }
@@ -233,6 +271,8 @@ async function refresh() {
     }
     const pcs = JSON.stringify([s.pcs, s.client_note]);
     if (pcs !== lastPcs) { lastPcs = pcs; renderPcs(s); }
+    const ni = JSON.stringify([s.networks, s.trusted, s.os]);
+    if (ni !== lastNetInfo) { lastNetInfo = ni; renderNetInfo(s); }
     const local = JSON.stringify(s.local);
     if (local !== lastLocal) { lastLocal = local; renderLocal(s.local || []); }
     if (document.getElementById('banner').textContent.startsWith('USBeam is not responding')) banner('');

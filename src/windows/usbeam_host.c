@@ -947,12 +947,15 @@ done:
     return 0;
 }
 
+static int net_ip_allowed(uint32_t ip);     // netpolicy.h
+
 static DWORD WINAPI server_main(LPVOID arg) {
     SOCKET ls = (SOCKET)(uintptr_t)arg;
     for (;;) {
         struct sockaddr_in ca; int cl = sizeof ca;
         SOCKET s = accept(ls, (struct sockaddr *)&ca, &cl);
         if (s == INVALID_SOCKET) { Sleep(100); continue; }
+        if (!net_ip_allowed(ntohl(ca.sin_addr.s_addr))) { closesocket(s); continue; }   // not a network USBeam is used on
         BOOL one = TRUE;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof one);
         struct tcp_keepalive ka = { 1, 10000, 2000 };   // detect a dead network in ~20 s
