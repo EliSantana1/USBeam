@@ -230,8 +230,8 @@ begin
   begin
     // An update that stops here: the USBeam already installed goes back to work as before.
     Exec(ExpandConstant('{sys}\sc.exe'), 'start USBeam', '', SW_HIDE, ewWaitUntilTerminated, Code);
-    Result := Why + #13#10 + #13#10 + 'USBeam was not installed. Please try again; if it keeps failing, restart Windows first.' +
-              #13#10 + 'Details: ' + ExpandConstant('{tmp}\usbip-install.log');
+    Result := Why + #13#10 + #13#10 + 'USBeam was not installed. Please try again; if it keeps failing, restart Windows first.' + #13#10 +
+              'Details: ' + ExpandConstant('{tmp}\usbip-install.log');
     if WizardSilent then MsgBox(Result, mbError, MB_OK);
   end
   else
