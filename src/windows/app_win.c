@@ -389,7 +389,65 @@ static void usbip_stop_retries(void) {
     if (usbip_unknown_option(out)) { g_no_stopall = 1; logm("usbip-win2 has no --stop-all option (older version)"); }
 }
 
+static char g_attach_err[160];       // why the last attach failed, in plain words (shown in the app)
+static void attach_error_from(const char *out) {
+    if (strstr(out, "Multiple instances of VHCI"))
+        snprintf(g_attach_err, sizeof g_attach_err, plat_restart_needed()
+                 ? "Restart Windows to finish installing the USB driver, then try again."
+                 : "Windows has two of the USB driver's controllers. Install USBeam again to repair the driver.");
+    else if (strstr(out, "VHCI") || strstr(out, "vhci"))
+        snprintf(g_attach_err, sizeof g_attach_err, "The usbip-win2 driver isn't working. Restart Windows; if that doesn't help, install USBeam again.");
+    else if (strstr(out, "refused") || strstr(out, "timed out") || strstr(out, "timeout") || strstr(out, "unreachable") || strstr(out, "connect"))
+        snprintf(g_attach_err, sizeof g_attach_err, "The other PC didn't answer.");
+    else if (strstr(out, "import") || strstr(out, "not available") || strstr(out, "busy") || strstr(out, "exported"))
+        snprintf(g_attach_err, sizeof g_attach_err, "The other PC didn't hand it over. It may have just been taken, unplugged or kept there.");
+    else {
+        char first[110] = ""; size_t k = 0;
+        const char *p = out; while (*p == ' ' || *p == '\r' || *p == '\n') p++;
+        if (!strncmp(p, "error: ", 7)) p += 7;
+        while (*p && *p != '\r' && *p != '\n' && k < sizeof first - 1) first[k++] = *p++;
+        first[k] = 0;
+        snprintf(g_attach_err, sizeof g_attach_err, "Couldn't connect%s%s", first[0] ? ": " : ".", first);
+    }
+}
+// usbip-win2 refuses to work when Windows has more than one of its virtual USB controllers
+// ("Multiple instances of VHCI device interface found"), which can happen when it was installed
+// twice over itself. Keep the first controller and remove the extra ones (only the device
+// entries: usbip-win2 itself stays installed). Returns how many were removed.
+static int usbip_remove_extra_controllers(void) {
+    if (!pDiUninstallDevice) return 0;
+    HDEVINFO set = SetupDiGetClassDevsW(NULL, NULL, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (set == INVALID_HANDLE_VALUE) return 0;
+    SP_DEVINFO_DATA dev = { sizeof dev };
+    wchar_t keep[256] = L"";
+    int removed = 0;
+    for (int pass = 0; pass < 2; pass++)          // pass 0: find the first controller; pass 1: remove the others
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &dev); i++) {
+            wchar_t hw[1024] = L"", inst[256] = L"";
+            if (!SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_HARDWAREID, NULL, (BYTE *)hw, sizeof hw - 4, NULL)) continue;
+            int match = 0;
+            for (wchar_t *h = hw; *h; h += wcslen(h) + 1) if (!_wcsicmp(h, L"ROOT\\USBIP_WIN2\\UDE")) match = 1;
+            if (!match || !SetupDiGetDeviceInstanceIdW(set, &dev, inst, 256, NULL)) continue;
+            if (pass == 0) { if (!keep[0] || _wcsicmp(inst, keep) < 0) wcscpy(keep, inst); continue; }
+            if (!_wcsicmp(inst, keep)) continue;
+            BOOL reboot = FALSE;
+            if (pDiUninstallDevice(NULL, set, &dev, 0, &reboot)) { removed++; logm("Removed an extra usbip-win2 controller (%ls); kept %ls", inst, keep); }
+            else logm("Could not remove the extra usbip-win2 controller %ls (%lu)", inst, GetLastError());
+        }
+    SetupDiDestroyDeviceInfoList(set);
+    return removed;
+}
+
+static int usbip_attach_once(const char *host, const char *busid);
 static int usbip_attach(const char *host, const char *busid) {
+    int port = usbip_attach_once(host, busid);
+    if (port < 0 && strstr(g_attach_err, "two of the USB driver's controllers") && usbip_remove_extra_controllers() > 0) {
+        Sleep(1500);
+        port = usbip_attach_once(host, busid);
+    }
+    return port;
+}
+static int usbip_attach_once(const char *host, const char *busid) {
     wchar_t args[256];
     char out[2048] = "";
     _snwprintf(args, 256, L"attach -r %hs -b %hs%ls", host, busid, g_no_once ? L"" : L" --once");
@@ -406,6 +464,7 @@ static int usbip_attach(const char *host, const char *busid) {
     char *p = strstr(out, "port ");
     if (strstr(out, "succes") && p) { logm("attach %s %s: %s", host, busid, out); return atoi(p + 5); }
     logm("attach %s %s failed: %s", host, busid, out);
+    attach_error_from(out);
     return -1;
 }
 
@@ -427,6 +486,26 @@ static int plat_port_alive(int port, const char *ip, const char *busid) {
 }
 static void plat_detach(int port) { usbip_detach(port); }
 static void plat_stop_retries(void) { usbip_stop_retries(); }
+static const char *plat_attach_error(void) { return g_attach_err; }
+// The installer installed or updated the usbip-win2 driver and Windows hasn't restarted since
+// (it leaves C:\ProgramData\USBeam\restart-needed; removed here after the next restart).
+static int plat_restart_needed(void) {
+    static ULONGLONG next; static int cached;
+    ULONGLONG now = GetTickCount64();
+    if (now < next) return cached;
+    next = now + 5000;
+    wchar_t pd[MAX_PATH], p[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH)) wcscpy(pd, L"C:\\ProgramData");
+    _snwprintf(p, MAX_PATH, L"%ls\\USBeam\\restart-needed", pd);
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(p, GetFileExInfoStandard, &fa)) return cached = 0;
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);
+    ULONGLONG nowft = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    ULONGLONG boot = nowft - now * 10000ULL;                 // when Windows started
+    ULONGLONG written = ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    if (written < boot) { DeleteFileW(p); logm("Windows restarted: the USB driver installation is complete"); return cached = 0; }
+    return cached = 1;
+}
 static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) {
     int n = 0;
     for (int k = 0; k < g_natt && n < max; k++) {

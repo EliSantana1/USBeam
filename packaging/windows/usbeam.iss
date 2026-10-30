@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.3.8"
+#define AppVersion "0.3.9"
 ; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled, installed when
 ; missing or older (github.com/vadimgrn/usbip-win2, BSD-2-Clause, see THIRD-PARTY.txt).
 #define UsbipVersion "0.9.8.1"
@@ -130,6 +130,10 @@ begin
     UsbipInstalledNow := True;
     // Remember that USBeam installed it, so uninstalling USBeam removes it again.
     RegWriteDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', 1);
+    // Tells USBeam to show "Restart Windows to finish installing the USB driver" until Windows restarts
+    // (updates from inside the app run silently, so this installer's own restart question isn't seen).
+    ForceDirectories(ExpandConstant('{commonappdata}\USBeam'));
+    SaveStringToFile(ExpandConstant('{commonappdata}\USBeam\restart-needed'), 'usbip-win2 ' + '{#UsbipVersion}', False);
   end
   else
     SuppressibleMsgBox('The usbip-win2 driver could not be installed (code ' + IntToStr(Code) + ').' + #13#13 +

@@ -145,6 +145,28 @@ static Use *use_new(const char *pc, const char *busid) {
 
 static int g_cl_dirty;            // the list of known PCs changed: save it
 
+// Why Use failed for a device (shown on its row for a minute, or until the next Use).
+typedef struct { char pc[40], busid[32], msg[160]; unsigned long long until; } UseFail;
+static UseFail g_fail[8];
+static void fail_set(const char *pc, const char *busid, const char *msg, unsigned long long now) {
+    int k = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!strcmp(g_fail[i].pc, pc) && !strcmp(g_fail[i].busid, busid)) { k = i; break; }
+        if (g_fail[i].until < g_fail[k].until) k = i;
+    }
+    snprintf(g_fail[k].pc, sizeof g_fail[k].pc, "%s", pc);
+    snprintf(g_fail[k].busid, sizeof g_fail[k].busid, "%s", busid);
+    snprintf(g_fail[k].msg, sizeof g_fail[k].msg, "%s", msg && msg[0] ? msg : "Couldn't connect to the device.");
+    g_fail[k].until = now + 60000;
+}
+static void fail_clear(const char *pc, const char *busid) {
+    for (int i = 0; i < 8; i++) if (!strcmp(g_fail[i].pc, pc) && !strcmp(g_fail[i].busid, busid)) g_fail[i].until = 0;
+}
+static const char *fail_get(const char *pc, const char *busid, unsigned long long now) {
+    for (int i = 0; i < 8; i++) if (g_fail[i].until > now && !strcmp(g_fail[i].pc, pc) && !strcmp(g_fail[i].busid, busid)) return g_fail[i].msg;
+    return NULL;
+}
+
 // A PC was seen (discovery message or info reply) at `ip` with USBeam id `id`.
 // Keeps exactly one entry per PC, merging an entry that was added by address.
 static Remote *remote_seen(const char *id, const char *name, const char *ip) {
@@ -314,6 +336,8 @@ static int disco_reply_due(const char *ip) {
 static void client_save(void);
 static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max);
 static void plat_stop_retries(void);
+static const char *plat_attach_error(void);
+static int plat_restart_needed(void);
 static void peer_label(const char *ip, char *out, size_t n, int cl_held);
 
 static void client_tick(void) {
@@ -473,12 +497,13 @@ static void client_tick(void) {
             if (port >= 0) g_use[i].attached_at = now;
             snprintf(g_use[i].ip, sizeof g_use[i].ip, "%s", ip);
             if (port < 0) {
+                if (!g_use[i].autorc || !fail_get(u.pc, u.busid, now)) fail_set(u.pc, u.busid, plat_attach_error(), now);
                 g_use[i].next_try = now + 3000;
                 if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }    // a one-off Use that failed
             }
         }
         cl_unlock();
-        if (port >= 0) { logm("[%s] attached from %s on port %d", u.busid, ip, port); plat_tune(); }
+        if (port >= 0) { cl_lock(); fail_clear(u.pc, u.busid); cl_unlock(); logm("[%s] attached from %s on port %d", u.busid, ip, port); plat_tune(); }
     }
     if (changed) client_save();
 }
@@ -621,6 +646,8 @@ static void client_json(sb_t *j) {
     sb_add(j, "]", 1);
     const char *note = plat_client_note();
     if (note) { sb_add(j, ",\"client_note\":", 15); sb_jstr(j, note); }
+    if (plat_restart_needed()) sb_add(j, ",\"restart_needed\":true", 22);
+    unsigned long long jnow = now_ms();
     sb_add(j, ",\"pcs\":[", 8);
     cl_lock();
     first = 1;
@@ -661,6 +688,8 @@ static void client_json(sb_t *j) {
             sb_printf(j, ",\"state\":\"%s\",\"countdown\":%d,\"auto\":%s,\"input\":%s,\"peer\":", st, d->countdown, (u && u->autorc) ? "true" : "false", d->input ? "true" : "false");
             char pl[160]; peer_label(d->peer, pl, sizeof pl, 1);
             sb_jstr(j, pl);
+            const char *fe = strcmp(st, "mine") ? fail_get(r->id, d->busid, jnow) : NULL;
+            if (fe) { sb_add(j, ",\"error\":", 9); sb_jstr(j, fe); }
             sb_add(j, "}", 1);
         }
         for (int k = 0; k < CL_MAXW; k++) {     // devices in use / waiting that the PC doesn't list right now
@@ -813,6 +842,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
             else if (!strcmp(op, "auto")) { u->autorc = on; if (!on && !u->want) u->used = 0; }
             else {
                 u->want = 1; u->next_try = 0; u->release = 0;
+                fail_clear(pc, busid);
                 Remote *r = rm_find(pc);
                 if (r) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, busid) && r->dev[k].name[0]) {
                     snprintf(u->name, sizeof u->name, "%s", r->dev[k].name);

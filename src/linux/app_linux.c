@@ -86,7 +86,8 @@ static int plat_attach(const char *ip, const char *busid) {
     Want w; memset(&w, 0, sizeof w);
     snprintf(w.busid, sizeof w.busid, "%s", busid);
     w.port = -1;
-    if (attach_one(ip, &w) != 0) return -1;
+    g_attach_err[0] = 0;
+    if (attach_one(ip, &w) != 0) { if (!g_attach_err[0]) snprintf(g_attach_err, sizeof g_attach_err, "Couldn't connect to the device."); return -1; }
     port_note(w.port, ip, busid);
     return w.port;
 }
@@ -97,6 +98,8 @@ static int plat_port_alive(int port, const char *ip, const char *busid) {
 }
 static void plat_detach(int port) { if (plat_port_alive(port, NULL, NULL)) detach_port(port); port_note(port, NULL, NULL); }
 static void plat_stop_retries(void) {}           // Linux's vhci-hcd never reconnects by itself
+static const char *plat_attach_error(void) { return g_attach_err; }
+static int plat_restart_needed(void) { return 0; }
 static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) {
     int n = 0;
     DIR *d = opendir("/run/usbeam");

@@ -2,7 +2,7 @@
 # Builds the USBeam package for Arch Linux and Arch-based systems (EndeavourOS, Manjaro...).
 # Run from this folder: makepkg
 pkgname=usbeam
-pkgver=0.3.8
+pkgver=0.3.9
 pkgrel=1
 pkgdesc="Free, open-source USB over IP: share USB devices between your computers"
 arch=('x86_64' 'aarch64')

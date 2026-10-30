@@ -186,17 +186,19 @@ static void tune_drives(void) {
 // ---------------------------------------------------------------- attach
 typedef struct { char busid[32]; int port; int was_attached; time_t next_try; int quiet; } Want;
 
+static char g_attach_err[160];     // why the last attach failed, in plain words (shown in the app)
 static int attach_one(const char *ip, Want *w) {
     int s = connect_host(ip);
-    if (s < 0) { if (!w->quiet) logm("[%s] host %s not reachable, will keep trying", w->busid, ip); return -1; }
+    if (s < 0) { snprintf(g_attach_err, sizeof g_attach_err, "The other PC didn't answer."); if (!w->quiet) logm("[%s] host %s not reachable, will keep trying", w->busid, ip); return -1; }
     uint8_t req[40];
     op_header(req, OP_REQ_IMPORT);
     memset(req + 8, 0, 32);
     strncpy((char *)req + 8, w->busid, 31);
     uint8_t rep[8 + 312];
-    if (send_all(s, req, 40) || recv_all(s, rep, 8)) { close(s); if (!w->quiet) logm("[%s] no reply from host, will keep trying", w->busid); return -1; }
+    if (send_all(s, req, 40) || recv_all(s, rep, 8)) { close(s); snprintf(g_attach_err, sizeof g_attach_err, "The other PC didn't answer."); if (!w->quiet) logm("[%s] no reply from host, will keep trying", w->busid); return -1; }
     if (g32(rep + 4) != 0) {
         close(s);
+        snprintf(g_attach_err, sizeof g_attach_err, "The other PC didn't hand it over. It may have just been taken, unplugged or kept there.");
         if (!w->quiet) logm("[%s] not available on host (not shared, unplugged, or in use), will keep trying", w->busid);
         return -1;
     }
@@ -204,13 +206,14 @@ static int attach_one(const char *ip, Want *w) {
     uint8_t *d = rep + 8;
     uint32_t busnum = g32(d + 288), devnum = g32(d + 292), speed = g32(d + 296);
     int port = free_port(speed >= 5);
-    if (port < 0) { close(s); logm("[%s] no free virtual USB port", w->busid); return -1; }
+    if (port < 0) { close(s); snprintf(g_attach_err, sizeof g_attach_err, "All of this PC's virtual USB ports are in use. Release a device first."); logm("[%s] no free virtual USB port", w->busid); return -1; }
     struct timeval tv = { 0, 0 };            // kernel owns the socket from here: no timeouts
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     char val[64];
     snprintf(val, sizeof val, "%d %d %u %u", port, s, (busnum << 16) | devnum, speed);
     if (write_sysfs(VHCI "/attach", val) < 0) {
+        snprintf(g_attach_err, sizeof g_attach_err, "Linux refused to connect the device (%s).", strerror(errno));
         logm("[%s] kernel refused attach (%s)", w->busid, strerror(errno));
         close(s); return -1;
     }

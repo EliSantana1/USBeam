@@ -68,6 +68,7 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
 .dinfo { flex: 1 1 240px; min-width: 0; }
 .dname { font-weight: 500; overflow-wrap: anywhere; }
 .dsub { font-size: 12px; color: var(--muted); }
+.derr { font-size: 12px; color: var(--bad); margin-top: 2px; }
 .pill { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; background: var(--chip); white-space: nowrap; color: var(--muted); }
 .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.accent { color: var(--accent); } .pill.bad { color: var(--bad); }
 .auto { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); cursor: pointer; min-height: 36px; user-select: none; }
@@ -249,6 +250,11 @@ function inputWarning(a) {
     <p class="small">This message is shown only once.</p>
     <div class="acts"><button class="btn" onclick="pendingAct=null;closeModal()">Cancel</button><button class="btn primary" onclick="act({op:'set_inputwarned'}).then(runPending)">I understand</button></div>`);
 }
+function confirmRestartPc() {
+  modal(`<h3>Restart Windows now?</h3>
+    <p>Save your work in other programs first. Windows restarts right away.</p>
+    <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="closeModal();appLink('restart_pc', {})">Restart now</button></div>`);
+}
 function showSecurity() {
   toggleMenu();
   modal(`<h3>About network security</h3>
@@ -285,7 +291,7 @@ function remoteRow(pc, d) {
   const locked = (d.state === 'busy' || d.state === 'drive_busy') && !d.auto;   // only the PC using it decides (unticking stays possible)
   const sub = [d.vid && d.pid ? d.vid + ':' + d.pid : '', d.busid].filter(Boolean).join(' · ');
   return `<div class="row"><div class="dicon">${ICON}</div>
-    <div class="dinfo"><div class="dname">${esc(d.name || 'USB device')}</div><div class="dsub">${esc(sub)}</div></div>
+    <div class="dinfo"><div class="dname">${esc(d.name || 'USB device')}</div><div class="dsub">${esc(sub)}</div>${d.error ? `<div class="derr" role="status">${esc(d.error)}</div>` : ''}</div>
     <span class="pill ${kind}">${esc(label)}</span>
     <label class="auto${locked ? ' off' : ''}" ${locked ? 'title="Set by the PC using this device"' : ''}><input type="checkbox" ${d.auto ? 'checked' : ''} ${locked ? 'disabled' : ''} data-act="${attr(Object.assign({ op: 'auto' }, key))}">Auto-reconnect</label>
     ${btn}</div>`;
@@ -293,6 +299,9 @@ function remoteRow(pc, d) {
 function renderPcs(s) {
   const pcs = s.pcs || [];
   let html = s.client_note ? `<div class="note">${esc(s.client_note)}</div>` : '';
+  if (s.restart_needed) html += `<div class="netnote"><div class="txt"><b>Restart Windows to finish installing the USB driver.</b>
+    <div>Until then, this PC can't use devices from other PCs. Sharing this PC's own devices works as usual.</div></div>
+    <div class="acts"><button class="btn primary" onclick="confirmRestartPc()">Restart now</button></div></div>`;
   if (!pcs.length) html += `<div class="empty">No other PCs found${s.net === 'auto' ? '' : ' on this network'} yet. They appear here automatically when USBeam runs on them, or add one by address below.</div>`;
   for (const pc of pcs) {
     html += `<section class="box"><div class="boxhead">${PCICON}<span class="name">${esc(pc.name)}</span>
@@ -571,7 +580,7 @@ async function refresh() {
         ? 'Showing PCs on every network this PC can reach. Home network is preferred; ZeroTier or Tailscale is used when you are away.'
         : 'Showing only PCs reachable over ' + label + '.';
     }
-    const pcs = JSON.stringify([s.pcs, s.client_note]);
+    const pcs = JSON.stringify([s.pcs, s.client_note, s.restart_needed]);
     if (pcs !== lastPcs) { lastPcs = pcs; renderPcs(s); }
     const ni = JSON.stringify([s.networks, s.trusted, s.os]);
     if (ni !== lastNetInfo) { lastNetInfo = ni; renderNetInfo(s); }

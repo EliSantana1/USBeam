@@ -272,6 +272,18 @@ static void app_link(const std::wstring &uri) {
             j->url.find_first_of(L"\\%?#") != std::wstring::npos || j->url.size() < 5 || j->url.compare(j->url.size() - 4, 4, L".exe") != 0) { delete j; report(L"This update can't be installed from here."); return; }
         for (wchar_t c : j->ver) if (!iswdigit(c) && c != L'.') { delete j; return; }
         CloseHandle(CreateThread(nullptr, 0, update_thread, j, 0, nullptr));
+    } else if (what == L"restart_pc") {              // "Restart now" (after a driver install), confirmed in the page
+        HANDLE tok;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
+            TOKEN_PRIVILEGES tp = {};
+            tp.PrivilegeCount = 1;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            if (LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege", &tp.Privileges[0].Luid))
+                AdjustTokenPrivileges(tok, FALSE, &tp, 0, nullptr, nullptr);
+            CloseHandle(tok);
+        }
+        if (!ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_MINOR_INSTALLATION | SHTDN_REASON_FLAG_PLANNED))
+            report(L"Windows didn't restart. Restart it from the Start menu.");
     } else if (what == L"uninstall") {
         wchar_t dir[MAX_PATH];
         GetModuleFileNameW(nullptr, dir, MAX_PATH);
