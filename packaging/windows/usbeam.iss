@@ -98,6 +98,16 @@ const
 
 var
   UsbipInstalledNow, UsbipRemoved: Boolean;
+  ULogFile: String;     // the uninstall log (set while uninstalling)
+
+// Uninstall log: one file with a fixed name in the temporary folder (%TEMP%\USBeam-uninstall.log),
+// one line per step, so what the uninstall did can always be checked afterwards.
+procedure ULog(const S: String);
+begin
+  Log(S);
+  if ULogFile <> '' then
+    SaveStringToFile(ULogFile, GetDateTimeString('hh:nn:ss', #0, ':') + '  ' + S + #13#10, True);
+end;
 
 // "0.9.8.1" style versions: <0, 0, >0 like strcmp.
 function CompareVersions(A, B: String): Integer;
@@ -141,7 +151,7 @@ begin
   if not Exec(PowerShellExe(), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + F + '"',
               '', SW_HIDE, ewWaitUntilTerminated, Result) then
     Result := -1;
-  Log(Name + ' exit code ' + IntToStr(Result));
+  ULog(Name + ' exit code ' + IntToStr(Result));
 end;
 
 // The driver's virtual USB controllers (present ones), as a PowerShell expression.
@@ -255,20 +265,29 @@ end;
 
 // ---------------------------------------------------------------------------- uninstalling
 // Everything the driver leaves on this PC, removed directly. Exit code = parts still present.
-function DriverCleanupScript(): String;
+// Every step and its result is added to LogFile.
+function DriverCleanupScript(LogFile: String): String;
 begin
+  StringChangeEx(LogFile, '''', '''''', True);     // a ' in the path (user name) is written as '' for PowerShell
   Result :=
     '$ErrorActionPreference = ''SilentlyContinue''' + #13#10 +
-    'Unregister-ScheduledTask -TaskName ''USBip Detach All On Reboot Or Shutdown'' -Confirm:$false' + #13#10 +
-    'Get-PnpDevice | Where-Object { $_.HardwareID -contains ''' + UsbipHwid + ''' } | ForEach-Object { & pnputil.exe /remove-device $_.InstanceId | Out-Null }' + #13#10 +
-    '$infs = { Get-ChildItem "$env:windir\INF\oem*.inf" | Where-Object { Select-String -Path $_.FullName -Pattern ''usbip2_(ude|filter)'' -Quiet } }' + #13#10 +
-    '& $infs | ForEach-Object { & pnputil.exe /delete-driver $_.Name /uninstall /force | Out-Null }' + #13#10 +
-    'Remove-Item -LiteralPath ''HKLM:\' + UsbipKey + ''' -Recurse -Force' + #13#10 +
-    'Remove-Item -LiteralPath "$env:ProgramFiles\USBip" -Recurse -Force' + #13#10 +
-    'Remove-Item -LiteralPath "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\USBip" -Recurse -Force' + #13#10 +
-    '$left = @(Get-PnpDevice | Where-Object { $_.HardwareID -contains ''' + UsbipHwid + ''' }).Count + @(& $infs).Count' + #13#10 +
-    'if (Test-Path -LiteralPath ''HKLM:\' + UsbipKey + ''') { $left++ }' + #13#10 +
-    'if (Test-Path -LiteralPath "$env:ProgramFiles\USBip") { $left++ }' + #13#10;
+    '$log = ''' + LogFile + '''' + #13#10 +
+    'function W($m) { Add-Content -LiteralPath $log -Value ((Get-Date -Format ''HH:mm:ss'') + ''  cleanup: '' + $m) }' + #13#10 +
+    '$key = ''HKLM:\' + UsbipKey + '''' + #13#10 +
+    '$dirs = @("$env:ProgramFiles\USBip", "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\USBip")' + #13#10 +
+    '$devs = { @(Get-PnpDevice | Where-Object { $_.HardwareID -contains ''' + UsbipHwid + ''' }) }' + #13#10 +
+    '$infs = { @(Get-ChildItem "$env:windir\INF\oem*.inf" | Where-Object { Select-String -Path $_.FullName -Pattern ''usbip2_(ude|filter)'' -Quiet }) }' + #13#10 +
+    'if (Get-ScheduledTask -TaskName ''USBip Detach All On Reboot Or Shutdown'') { Unregister-ScheduledTask -TaskName ''USBip Detach All On Reboot Or Shutdown'' -Confirm:$false; W "removed the usbip-win2 scheduled task" }' + #13#10 +
+    '& $devs | ForEach-Object { & pnputil.exe /remove-device $_.InstanceId | Out-Null; W ("remove device " + $_.InstanceId + ": pnputil exit " + $LASTEXITCODE) }' + #13#10 +
+    '& $infs | ForEach-Object { & pnputil.exe /delete-driver $_.Name /uninstall /force | Out-Null; W ("delete driver " + $_.Name + ": pnputil exit " + $LASTEXITCODE) }' + #13#10 +
+    'if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force; W "removed the usbip-win2 Apps entry" }' + #13#10 +
+    'foreach ($d in $dirs) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force; W ("removed folder " + $d) } }' + #13#10 +
+    '$left = 0' + #13#10 +
+    '& $devs | ForEach-Object { $left++; W ("still present: device " + $_.InstanceId) }' + #13#10 +
+    '& $infs | ForEach-Object { $left++; W ("still present: driver " + $_.Name) }' + #13#10 +
+    'if (Test-Path -LiteralPath $key) { $left++; W "still present: Apps entry" }' + #13#10 +
+    'if (Test-Path -LiteralPath $dirs[0]) { $left++; W ("still present: folder " + $dirs[0]) }' + #13#10 +
+    'W ("parts still present: " + $left)' + #13#10;
 end;
 
 function UsbipPresent(): Boolean;
@@ -284,38 +303,60 @@ var
   Code: Integer;
 begin
   F := ExpandConstant('{commonappdata}\USBeam-driver-cleanup.ps1');
+  // This runs as Windows itself (SYSTEM), so its log goes to Windows' own temporary folder.
   SaveStringToFile(F,
-    'try {' + #13#10 + DriverCleanupScript() + '} finally {' + #13#10 +
+    'try {' + #13#10 + DriverCleanupScript(ExpandConstant('{win}\Temp\USBeam-driver-cleanup.log')) + '} finally {' + #13#10 +
     '  Unregister-ScheduledTask -TaskName ''USBeam driver cleanup'' -Confirm:$false' + #13#10 +
     '  Remove-Item -LiteralPath $PSCommandPath -Force' + #13#10 + '}' + #13#10, False);
   Exec(ExpandConstant('{sys}\schtasks.exe'),
        '/Create /F /TN "USBeam driver cleanup" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR "' +
        PowerShellExe() + ' -NoProfile -ExecutionPolicy Bypass -File \"' + F + '\""',
        '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Log('Scheduled the driver cleanup for the next start of Windows (schtasks exit ' + IntToStr(Code) + ')');
+  ULog('Some parts are still in use: scheduled their removal for the next start of Windows (schtasks exit ' + IntToStr(Code) + ').');
+  ULog('That step writes its own log: ' + ExpandConstant('{win}\Temp\USBeam-driver-cleanup.log'));
 end;
 
 procedure RemoveUsbip();
 var
-  Unins: String;
+  Unins, ULogUsbip: String;
+  Text: AnsiString;
   Code, Left: Integer;
 begin
   // usbip-win2's own uninstaller first, with its progress window shown.
-  if RegQueryStringValue(HKLM64, UsbipKey, 'UninstallString', Unins) then
+  ULogUsbip := AddBackslash(GetTempDir()) + 'usbip-win2-uninstall.log';
+  if not RegQueryStringValue(HKLM64, UsbipKey, 'UninstallString', Unins) then
+    ULog('usbip-win2 has no Apps entry: skipping its own uninstaller.')
+  else
   begin
     Unins := RemoveQuotes(Unins);
-    if FileExists(Unins) then
+    if not FileExists(Unins) then
+      ULog('usbip-win2''s uninstaller is missing (' + Unins + '): skipping it.')
+    else
     begin
-      Log('Removing usbip-win2: ' + Unins);
-      Exec(Unins, '/SILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + ExpandConstant('{%TEMP}\USBeam-usbip-uninstall.log') + '"',
-           '', SW_SHOW, ewWaitUntilTerminated, Code);
-      Log('usbip-win2 uninstaller exit code ' + IntToStr(Code));
+      ULog('Running usbip-win2''s uninstaller: ' + Unins);
+      DeleteFile(ULogUsbip);
+      if Exec(Unins, '/SILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + ULogUsbip + '"',
+              '', SW_SHOW, ewWaitUntilTerminated, Code) then
+        ULog('usbip-win2''s uninstaller finished, exit code ' + IntToStr(Code))
+      else
+        ULog('usbip-win2''s uninstaller did not start: ' + SysErrorMessage(Code));
+      // Its own log, copied in here so everything is in one file.
+      if LoadStringFromFile(ULogUsbip, Text) then
+      begin
+        SaveStringToFile(ULogFile, '----- usbip-win2''s uninstall log -----' + #13#10, True);
+        SaveStringToFile(ULogFile, Text, True);
+        SaveStringToFile(ULogFile, #13#10 + '----- end of usbip-win2''s log -----' + #13#10, True);
+      end
+      else
+        ULog('usbip-win2''s uninstaller wrote no log.');
     end;
   end;
   // Then anything it left behind, directly (twice: a part may only let go after another is gone).
-  Left := RunPS('usbeam-driver-cleanup.ps1', DriverCleanupScript() + 'exit $left' + #13#10);
-  if Left <> 0 then Left := RunPS('usbeam-driver-cleanup.ps1', DriverCleanupScript() + 'exit $left' + #13#10);
-  if Left <> 0 then ScheduleCleanupAfterRestart();     // what Windows still holds goes at the next start
+  ULog('Removing whatever usbip-win2 left behind.');
+  Left := RunPS('usbeam-driver-cleanup.ps1', DriverCleanupScript(ULogFile) + 'exit $left' + #13#10);
+  if Left <> 0 then Left := RunPS('usbeam-driver-cleanup.ps1', DriverCleanupScript(ULogFile) + 'exit $left' + #13#10);
+  if Left <> 0 then ScheduleCleanupAfterRestart()     // what Windows still holds goes at the next start
+  else ULog('usbip-win2 is fully removed.');
   UsbipRemoved := True;
 end;
 
@@ -325,18 +366,42 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
+    ULogFile := AddBackslash(GetTempDir()) + 'USBeam-uninstall.log';
+    SaveStringToFile(ULogFile, 'USBeam {#AppVersion} uninstall, ' +
+                     GetDateTimeString('yyyy-mm-dd hh:nn', '-', ':') + ', Windows ' + GetWindowsVersionString() + #13#10, False);
     // Stop USBeam first, so no device is connected through the driver while it's removed.
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im USBeam.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    ULog('Closed the USBeam window (taskkill exit ' + IntToStr(Code) + ').');
     if Exec(ExpandConstant('{sys}\sc.exe'), 'stop USBeam', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+    begin
+      ULog('Stopped the USBeam service.');
       Sleep(5000);
-    if UsbipPresent() and
-       (MsgBox('Also remove the usbip-win2 driver?' + #13#10 + #13#10 +
-               'It lets this PC use devices from other PCs. Choose No if another program uses it.',
-               mbConfirmation, MB_YESNO) = IDYES) then
+    end
+    else
+      ULog('The USBeam service was not running (sc exit ' + IntToStr(Code) + ').');
+    if not UsbipPresent() then
+      ULog('usbip-win2 is not installed.')
+    else if MsgBox('Also remove the usbip-win2 driver?' + #13#10 + #13#10 +
+                   'It lets this PC use devices from other PCs. Choose No if another program uses it.',
+                   mbConfirmation, MB_YESNO) = IDYES then
+    begin
+      ULog('Remove the usbip-win2 driver too: Yes.');
       RemoveUsbip();
+    end
+    else
+      ULog('Remove the usbip-win2 driver too: No (kept).');
+    ULog('Removing USBeam''s files.');
   end
   else if CurUninstallStep = usPostUninstall then
+  begin
     RegDeleteKeyIncludingSubkeys(HKLM64, 'SOFTWARE\USBeam');
+    if DirExists(ExpandConstant('{app}')) then
+      ULog('USBeam''s folder is still there (Windows removes it at the next restart): ' + ExpandConstant('{app}'))
+    else
+      ULog('USBeam''s files are removed.');
+    if UsbipRemoved then ULog('Uninstall finished. Restart Windows to finish removing the driver.')
+    else ULog('Uninstall finished.');
+  end;
 end;
 
 // Removing the driver finishes when Windows restarts.
