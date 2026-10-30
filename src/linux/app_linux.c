@@ -749,7 +749,7 @@ static int ui_api_locked(const char *method, const char *path, const char *body,
 
 // Requests from other PCs (port 3240) and the once-a-second host checks.
 static void *host_main(void *arg) {
-    int ls = (int)(intptr_t)arg, one = 1;
+    int ls = (int)(intptr_t)arg;
     time_t last_tick = 0;
     while (!g_stop) {
         struct pollfd pf = { ls, POLLIN, 0 };
@@ -759,12 +759,7 @@ static void *host_main(void *arg) {
             if (s >= 0 && !net_ip_allowed(ntohl(ca.sin_addr.s_addr))) { close(s); s = -1; }   // not a network USBeam is used on
             if (s >= 0) {
                 char peer[64]; inet_ntop(AF_INET, &ca.sin_addr, peer, sizeof peer);
-                setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-                int idle = 10, intvl = 2, cnt = 5;
-                setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+                tune_device_socket(s);
                 struct timeval tv = { 5, 0 };
                 setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
                 setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);

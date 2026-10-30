@@ -22,6 +22,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#ifndef TCP_MAXRT
+#define TCP_MAXRT 5
+#endif
+#ifndef TCP_KEEPCNT
+#define TCP_KEEPCNT 16
+#endif
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
@@ -1083,6 +1089,12 @@ static DWORD WINAPI server_main(LPVOID arg) {
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof one);
         struct tcp_keepalive ka = { 1, 10000, 2000 };   // detect a dead network in ~20 s
         DWORD br; WSAIoctl(s, SIO_KEEPALIVE_VALS, &ka, sizeof ka, NULL, 0, &br, NULL, NULL);
+        // Keepalive only covers a quiet connection. A device in use almost always has data waiting
+        // to be delivered, so also limit how long unanswered data is resent (else the device can stay
+        // "in use" by a PC that is gone). Windows 10 1709+ also takes the keepalive count (older: ignored).
+        DWORD maxrt = 20, kcnt = 5;
+        setsockopt(s, IPPROTO_TCP, TCP_MAXRT, (char *)&maxrt, sizeof maxrt);
+        setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, (char *)&kcnt, sizeof kcnt);
         Conn *c = calloc(1, sizeof *c);
         c->s = s;
         inet_ntop(AF_INET, &ca.sin_addr, c->peer, sizeof c->peer);

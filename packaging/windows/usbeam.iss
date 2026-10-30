@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.3.9"
+#define AppVersion "0.3.10"
 ; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled and always installed
 ; (when missing or older), visibly, before USBeam itself. github.com/vadimgrn/usbip-win2,
 ; BSD-2-Clause, see THIRD-PARTY.txt.

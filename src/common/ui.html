@@ -285,7 +285,7 @@ function remoteRow(pc, d) {
   }
   let btn = '<span class="noact">—</span>';
   const info = { _pc: pc.name, _dev: d.name || 'USB device', _peer: d.peer || 'another PC' };
-  if (['mine', 'connecting', 'waiting', 'countdown'].includes(d.state)) btn = `<button class="btn" data-act="${attr(Object.assign({ op: 'release' }, key))}">Release</button>`;
+  if (['mine', 'connecting', 'waiting'].includes(d.state) || (d.state === 'countdown' && d.auto)) btn = `<button class="btn" data-act="${attr(Object.assign({ op: 'release' }, key))}">Release</button>`;
   else if (d.state === 'available') btn = `<button class="btn primary" data-pre="${d.input ? 'input' : ''}" data-act="${attr(Object.assign({ op: 'use' }, key, info))}">Use</button>`;
   else if (d.state === 'busy') btn = `<button class="btn" data-pre="kick" data-act="${attr(Object.assign({ op: 'kick' }, key, info))}" title="Release it from the PC using it">Release</button>`;
   const locked = (d.state === 'busy' || d.state === 'drive_busy') && !d.auto;   // only the PC using it decides (unticking stays possible)

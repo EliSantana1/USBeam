@@ -63,6 +63,24 @@ static int send_all(int s, const void *b, size_t n) {
 static uint32_t g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static uint16_t g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 
+#ifndef TCP_USER_TIMEOUT
+#define TCP_USER_TIMEOUT 18
+#endif
+// Settings for a connection that may carry a device. A dead network (Wi-Fi dropped, PC asleep)
+// is noticed within ~20 s: keepalive covers a quiet connection, and TCP_USER_TIMEOUT covers one
+// with data waiting to be delivered (a game controller always has some). Without it, Linux keeps
+// retrying for up to ~15 minutes and the device stays "in use" by a PC that is gone.
+static void tune_device_socket(int s) {
+    int one = 1, idle = 10, intvl = 2, cnt = 5;
+    unsigned int user_ms = 20000;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+    setsockopt(s, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_ms, sizeof user_ms);
+}
+
 static int connect_host(const char *ip) {
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET; a.sin_port = htons(USBIP_PORT);
@@ -72,14 +90,7 @@ static int connect_host(const char *ip) {
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return -1; }
-    int one = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    // Detect a dead network within ~20 s once the kernel owns the socket.
-    int idle = 10, intvl = 2, cnt = 5;
-    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
-    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
-    setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+    tune_device_socket(s);
     return s;
 }
 

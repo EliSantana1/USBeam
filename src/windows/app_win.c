@@ -250,6 +250,11 @@ static DWORD WINAPI monitor_main(LPVOID arg) {
                 InterlockedExchange(&d->busy, 0);
                 continue;
             }
+            if (d->present && d->returning) {   // came back already on its own driver: still start the countdown
+                d->returning = 0;
+                d->hold_until = now + (ULONGLONG)g_hold_secs * 1000; d->last_shown = 0;
+                say("[%s] %ls was plugged back in and works on this PC. Other PCs may take it again in %d s (Cancel in the USBeam window).", d->busid, d->name, g_hold_secs);
+            }
             if (d->hold_until && now >= d->hold_until) {
                 d->hold_until = 0; d->blocked = 0;
                 say("[%s] Countdown finished: %ls is available to other PCs again.", d->busid, d->name);

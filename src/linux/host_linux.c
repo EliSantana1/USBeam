@@ -544,12 +544,7 @@ static int cmd_host(void) {
             int s = accept(ls, (struct sockaddr *)&ca, &cl);
             if (s >= 0) {
                 char peer[64]; inet_ntop(AF_INET, &ca.sin_addr, peer, sizeof peer);
-                setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-                int idle = 10, intvl = 2, cnt = 5;
-                setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
-                setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+                tune_device_socket(s);
                 struct timeval tv = { 5, 0 };
                 setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
                 uint8_t op[8];
