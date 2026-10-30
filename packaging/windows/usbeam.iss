@@ -4,8 +4,9 @@
 ; (tray icon at sign-in, window on demand).
 
 #define AppVersion "0.3.9"
-; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled, installed when
-; missing or older (github.com/vadimgrn/usbip-win2, BSD-2-Clause, see THIRD-PARTY.txt).
+; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled and always installed
+; (when missing or older), visibly, before USBeam itself. github.com/vadimgrn/usbip-win2,
+; BSD-2-Clause, see THIRD-PARTY.txt.
 #define UsbipVersion "0.9.8.1"
 #define UsbipAppId "{199505b0-b93d-4521-a8c7-897818e0205a}"
 
@@ -31,7 +32,8 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible arm64
 ArchitecturesInstallIn64BitMode=x64compatible arm64
-MinVersion=10.0.17763
+; Windows 10 version 2004 or later (needed to repair or remove the driver's virtual controller).
+MinVersion=10.0.19041
 CloseApplications=force
 ; Uninstall log in the temporary folder ("Uninstall Log ..."), for finding problems.
 UninstallLogging=yes
@@ -83,10 +85,21 @@ Type: filesandordirs; Name: "{commonappdata}\USBeam"
 Type: filesandordirs; Name: "{localappdata}\USBeam"
 
 [Code]
-var
-  UsbipInstalledNow: Boolean;
+// ============================================================================ usbip-win2 driver
+// Installing USBeam always installs the driver (USBeam both shares devices and uses them), with
+// a message and its progress window shown. If the driver can't be installed, USBeam isn't either.
+// Uninstalling asks whether to remove the driver too; if yes, it is removed completely: by its own
+// uninstaller, then anything left over directly (and, for parts Windows keeps in use, once more
+// at the next start of Windows).
 
-// "0.9.8.1" -> comparable parts; returns <0, 0, >0 like strcmp.
+const
+  UsbipKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1';
+  UsbipHwid = 'ROOT\USBIP_WIN2\UDE';
+
+var
+  UsbipInstalledNow, UsbipRemoved: Boolean;
+
+// "0.9.8.1" style versions: <0, 0, >0 like strcmp.
 function CompareVersions(A, B: String): Integer;
 var
   PA, PB, NA, NB: Integer;
@@ -103,93 +116,224 @@ begin
   end;
 end;
 
-// usbip-win2 is missing or older than the bundled version. One installed some other way
-// (no version known) is left alone.
-function UsbipNeeded(): Boolean;
-var
-  Ver: String;
+function UsbipInstalledVersion(): String;
 begin
-  if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1', 'DisplayVersion', Ver) then
-    Result := CompareVersions(Ver, '{#UsbipVersion}') < 0
-  else
-    Result := not FileExists(ExpandConstant('{commonpf64}\USBip\usbip.exe'));
+  if not RegQueryStringValue(HKLM64, UsbipKey, 'DisplayVersion', Result) then Result := '';
 end;
 
-procedure InstallUsbip();
+function UsbipExe(): String;
+begin
+  Result := ExpandConstant('{commonpf64}\USBip\usbip.exe');
+end;
+
+function PowerShellExe(): String;
+begin
+  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+// Runs a PowerShell script (written to a temporary file); returns its exit code, -1 if it didn't run.
+function RunPS(const Name, Script: String): Integer;
 var
   F: String;
+begin
+  F := AddBackslash(GetTempDir()) + Name;
+  SaveStringToFile(F, Script, False);
+  if not Exec(PowerShellExe(), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + F + '"',
+              '', SW_HIDE, ewWaitUntilTerminated, Result) then
+    Result := -1;
+  Log(Name + ' exit code ' + IntToStr(Result));
+end;
+
+// The driver's virtual USB controllers (present ones), as a PowerShell expression.
+function PSControllers(): String;
+begin
+  Result := '@(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains ''' + UsbipHwid + ''' } | Sort-Object InstanceId)';
+end;
+
+// Exactly one virtual controller must exist (two make usbip-win2 refuse to work). Removes extra
+// ones; returns how many there are afterwards.
+function FixControllers(): Integer;
+begin
+  Result := RunPS('usbeam-controllers.ps1',
+    '$d = ' + PSControllers() + #13#10 +
+    'if ($d.Count -gt 1) { $d | Select-Object -Skip 1 | ForEach-Object { & pnputil.exe /remove-device $_.InstanceId | Out-Null }; Start-Sleep -Seconds 2 }' + #13#10 +
+    'exit (' + PSControllers() + ').Count' + #13#10);
+end;
+
+// Installs (or updates) the driver. Returns '' when it is installed, else why not.
+function InstallUsbip(): String;
+var
+  F, Args: String;
   Code: Integer;
 begin
+  Result := '';
   if IsArm64 then F := 'USBip-{#UsbipVersion}-arm64.exe' else F := 'USBip-{#UsbipVersion}-x64.exe';
-  WizardForm.StatusLabel.Caption := 'Installing the usbip-win2 driver (lets this PC use devices from other PCs)...';
+  MsgBox('USBeam will now install the usbip-win2 driver ({#UsbipVersion}).' + #13#10 + #13#10 +
+         'It lets this PC use devices from other PCs. Its progress window appears next; it takes about a minute.',
+         mbInformation, MB_OK);
   ExtractTemporaryFile(F);
-  // Its own installer, silently: main program + client driver + Visual C++ runtime only.
-  Exec(ExpandConstant('{tmp}\') + F, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist"',
-       '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Log('usbip-win2 installer exit code ' + IntToStr(Code));
-  if FileExists(ExpandConstant('{commonpf64}\USBip\usbip.exe')) then
+  Args := '/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist" /LOG="' + ExpandConstant('{tmp}\usbip-install.log') + '"';
+  if not Exec(ExpandConstant('{tmp}\') + F, Args, '', SW_SHOW, ewWaitUntilTerminated, Code) then
   begin
-    UsbipInstalledNow := True;
-    // Remember that USBeam installed it, so uninstalling USBeam removes it again.
-    RegWriteDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', 1);
-    // Tells USBeam to show "Restart Windows to finish installing the USB driver" until Windows restarts
-    // (updates from inside the app run silently, so this installer's own restart question isn't seen).
-    ForceDirectories(ExpandConstant('{commonappdata}\USBeam'));
-    SaveStringToFile(ExpandConstant('{commonappdata}\USBeam\restart-needed'), 'usbip-win2 ' + '{#UsbipVersion}', False);
+    Result := 'The usbip-win2 driver installer could not be started (' + SysErrorMessage(Code) + ').';
+    Exit;
+  end;
+  Log('usbip-win2 installer exit code ' + IntToStr(Code));
+  if (CompareVersions(UsbipInstalledVersion(), '{#UsbipVersion}') < 0) or not FileExists(UsbipExe()) then
+  begin
+    Result := 'The usbip-win2 driver could not be installed (code ' + IntToStr(Code) + ').';
+    Exit;
+  end;
+  UsbipInstalledNow := True;
+  RegWriteDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', 1);
+  // USBeam shows "Restart Windows to finish installing the USB driver" until Windows restarts.
+  ForceDirectories(ExpandConstant('{commonappdata}\USBeam'));
+  SaveStringToFile(ExpandConstant('{commonappdata}\USBeam\restart-needed'), 'usbip-win2 {#UsbipVersion}', False);
+end;
+
+// Makes sure the driver is installed, up to date and working. '' = fine, else why not.
+function EnsureUsbip(): String;
+var
+  N: Integer;
+begin
+  Result := '';
+  if (CompareVersions(UsbipInstalledVersion(), '{#UsbipVersion}') < 0) or not FileExists(UsbipExe()) then
+  begin
+    Result := InstallUsbip();
+    if Result <> '' then Exit;
+  end;
+  N := FixControllers();
+  if N = 0 then
+  begin
+    // Installed, but its controller is missing: install it again (it replaces itself).
+    Result := InstallUsbip();
+    if Result <> '' then Exit;
+    N := FixControllers();
+  end;
+  if N <> 1 then
+    Result := 'The usbip-win2 driver is installed but not working (' + IntToStr(N) + ' controllers).';
+end;
+
+// ---------------------------------------------------------------------------- installing
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+  Why: String;
+begin
+  // Stop the running service and app before replacing their files (updates).
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im USBeam.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if Exec(ExpandConstant('{sys}\sc.exe'), 'stop USBeam', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+    Sleep(5000);
+  // The driver first: without it USBeam can't use devices from other PCs, so then nothing is installed.
+  Why := EnsureUsbip();
+  if Why <> '' then
+  begin
+    // An update that stops here: the USBeam already installed goes back to work as before.
+    Exec(ExpandConstant('{sys}\sc.exe'), 'start USBeam', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Result := Why + #13#10 + #13#10 + 'USBeam was not installed. Please try again; if it keeps failing, restart Windows first.' +
+              #13#10 + 'Details: ' + ExpandConstant('{tmp}\usbip-install.log');
+    if WizardSilent then MsgBox(Result, mbError, MB_OK);
   end
   else
-    SuppressibleMsgBox('The usbip-win2 driver could not be installed (code ' + IntToStr(Code) + ').' + #13#13 +
-      'USBeam can still share this PC''s devices. To use devices from other PCs here, install usbip-win2 from ' +
-      'github.com/vadimgrn/usbip-win2.', mbError, MB_OK, IDOK);
+    Result := '';
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if (CurStep = ssPostInstall) and UsbipNeeded() then InstallUsbip();
-end;
-
-// A freshly installed driver works after Windows restarts.
+// A freshly installed driver finishes working after Windows restarts.
 function NeedRestart(): Boolean;
 begin
   Result := UsbipInstalledNow;
 end;
 
-// Uninstalling: remove usbip-win2 too, but only if USBeam installed it. Done at the start of the
-// uninstall (while everything is still in place), with its own log in the temporary folder, and
-// checked afterwards: if it's still installed, the person is told how to remove it.
-var
-  UsbipRemoved: Boolean;
-
-function UsbipUninstallString(var Unins: String): Boolean;
+procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  Result := RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1', 'UninstallString', Unins);
-  if Result then Unins := RemoveQuotes(Unins);
-  Result := Result and FileExists(Unins);
+  // Updates from inside the app run without the last page (and its restart question): say it here.
+  if (CurStep = ssDone) and UsbipInstalledNow and WizardSilent then
+    MsgBox('USBeam is updated and the usbip-win2 driver is installed.' + #13#10 + #13#10 +
+           'Restart Windows to finish installing the driver. USBeam reminds you in its window until then.',
+           mbInformation, MB_OK);
+end;
+
+// ---------------------------------------------------------------------------- uninstalling
+// Everything the driver leaves on this PC, removed directly. Exit code = parts still present.
+function DriverCleanupScript(): String;
+begin
+  Result :=
+    '$ErrorActionPreference = ''SilentlyContinue''' + #13#10 +
+    'Unregister-ScheduledTask -TaskName ''USBip Detach All On Reboot Or Shutdown'' -Confirm:$false' + #13#10 +
+    'Get-PnpDevice | Where-Object { $_.HardwareID -contains ''' + UsbipHwid + ''' } | ForEach-Object { & pnputil.exe /remove-device $_.InstanceId | Out-Null }' + #13#10 +
+    '$infs = { Get-ChildItem "$env:windir\INF\oem*.inf" | Where-Object { Select-String -Path $_.FullName -Pattern ''usbip2_(ude|filter)'' -Quiet } }' + #13#10 +
+    '& $infs | ForEach-Object { & pnputil.exe /delete-driver $_.Name /uninstall /force | Out-Null }' + #13#10 +
+    'Remove-Item -LiteralPath ''HKLM:\' + UsbipKey + ''' -Recurse -Force' + #13#10 +
+    'Remove-Item -LiteralPath "$env:ProgramFiles\USBip" -Recurse -Force' + #13#10 +
+    'Remove-Item -LiteralPath "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\USBip" -Recurse -Force' + #13#10 +
+    '$left = @(Get-PnpDevice | Where-Object { $_.HardwareID -contains ''' + UsbipHwid + ''' }).Count + @(& $infs).Count' + #13#10 +
+    'if (Test-Path -LiteralPath ''HKLM:\' + UsbipKey + ''') { $left++ }' + #13#10 +
+    'if (Test-Path -LiteralPath "$env:ProgramFiles\USBip") { $left++ }' + #13#10;
+end;
+
+function UsbipPresent(): Boolean;
+begin
+  Result := RegKeyExists(HKLM64, UsbipKey) or FileExists(UsbipExe()) or DirExists(ExpandConstant('{commonpf64}\USBip'));
+end;
+
+// Parts Windows keeps in use until it restarts: removed by a one-time task at the next start,
+// which then deletes itself.
+procedure ScheduleCleanupAfterRestart();
+var
+  F: String;
+  Code: Integer;
+begin
+  F := ExpandConstant('{commonappdata}\USBeam-driver-cleanup.ps1');
+  SaveStringToFile(F,
+    'try {' + #13#10 + DriverCleanupScript() + '} finally {' + #13#10 +
+    '  Unregister-ScheduledTask -TaskName ''USBeam driver cleanup'' -Confirm:$false' + #13#10 +
+    '  Remove-Item -LiteralPath $PSCommandPath -Force' + #13#10 + '}' + #13#10, False);
+  Exec(ExpandConstant('{sys}\schtasks.exe'),
+       '/Create /F /TN "USBeam driver cleanup" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR "' +
+       PowerShellExe() + ' -NoProfile -ExecutionPolicy Bypass -File \"' + F + '\""',
+       '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Log('Scheduled the driver cleanup for the next start of Windows (schtasks exit ' + IntToStr(Code) + ')');
+end;
+
+procedure RemoveUsbip();
+var
+  Unins: String;
+  Code, Left: Integer;
+begin
+  // usbip-win2's own uninstaller first, with its progress window shown.
+  if RegQueryStringValue(HKLM64, UsbipKey, 'UninstallString', Unins) then
+  begin
+    Unins := RemoveQuotes(Unins);
+    if FileExists(Unins) then
+    begin
+      Log('Removing usbip-win2: ' + Unins);
+      Exec(Unins, '/SILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + ExpandConstant('{%TEMP}\USBeam-usbip-uninstall.log') + '"',
+           '', SW_SHOW, ewWaitUntilTerminated, Code);
+      Log('usbip-win2 uninstaller exit code ' + IntToStr(Code));
+    end;
+  end;
+  // Then anything it left behind, directly (twice: a part may only let go after another is gone).
+  Left := RunPS('usbeam-driver-cleanup.ps1', DriverCleanupScript() + 'exit $left' + #13#10);
+  if Left <> 0 then Left := RunPS('usbeam-driver-cleanup.ps1', DriverCleanupScript() + 'exit $left' + #13#10);
+  if Left <> 0 then ScheduleCleanupAfterRestart();     // what Windows still holds goes at the next start
+  UsbipRemoved := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  Flag: Cardinal;
-  Unins, LogFile: String;
   Code: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    if RegQueryDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', Flag) and (Flag = 1) and UsbipUninstallString(Unins) then
-    begin
-      LogFile := ExpandConstant('{%TEMP}\USBeam-usbip-uninstall.log');
-      Log('Removing usbip-win2: ' + Unins);
-      if Exec(Unins, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + LogFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
-        Log('usbip-win2 uninstaller exit code ' + IntToStr(Code))
-      else
-        Log('usbip-win2 uninstaller could not be started: ' + SysErrorMessage(Code));
-      Sleep(1000);
-      if UsbipUninstallString(Unins) then
-        SuppressibleMsgBox('USBeam was removed, but the usbip-win2 driver it installed could not be removed automatically.' + #13#13 +
-          'Remove it in Windows Settings -> Apps -> Installed apps -> USBip -> Uninstall.', mbInformation, MB_OK, IDOK)
-      else
-        UsbipRemoved := True;
-    end;
+    // Stop USBeam first, so no device is connected through the driver while it's removed.
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im USBeam.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if Exec(ExpandConstant('{sys}\sc.exe'), 'stop USBeam', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+      Sleep(5000);
+    if UsbipPresent() and
+       (MsgBox('Also remove the usbip-win2 driver?' + #13#10 + #13#10 +
+               'It lets this PC use devices from other PCs. Choose No if another program uses it.',
+               mbConfirmation, MB_YESNO) = IDYES) then
+      RemoveUsbip();
   end
   else if CurUninstallStep = usPostUninstall then
     RegDeleteKeyIncludingSubkeys(HKLM64, 'SOFTWARE\USBeam');
@@ -199,15 +343,4 @@ end;
 function UninstallNeedRestart(): Boolean;
 begin
   Result := UsbipRemoved;
-end;
-
-// Stop the running service and app before replacing their files (upgrades).
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  Code: Integer;
-begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im USBeam.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  if Exec(ExpandConstant('{sys}\sc.exe'), 'stop USBeam', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
-    Sleep(5000);
-  Result := '';
 end;

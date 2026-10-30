@@ -1,8 +1,8 @@
 USBeam for Windows includes usbip-win2, used to connect devices from other PCs.
 https://github.com/vadimgrn/usbip-win2
 
-USBeam installs it only when it is missing or older than the bundled version, and removes it
-again when USBeam is uninstalled, if USBeam was the one that installed it.
+USBeam's installer installs it (when it is missing or older than the bundled version), and
+USBeam's uninstaller asks whether to remove it too.
 
 usbip-win2 license:
 
