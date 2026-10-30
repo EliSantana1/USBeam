@@ -337,14 +337,15 @@ static void handle_info(int s) {
     sb_add(&j, ",\"devices\":[", 12);
     int first = 1;
     for (int i = 0; i < n; i++) {
-        if (is_hidden(ids[i]) || drive_mounted(ids[i]) || (is_radio(ids[i]) && !is_shared(ids[i]))) continue;
+        if (is_hidden(ids[i]) || (system_reason(ids[i]) && !is_shared(ids[i]))) continue;
         const char *st, *peer; int cd;
         host_state(ids[i], &st, &peer, &cd);
+        if (strcmp(st, "in_use") && drive_mounted(ids[i])) { st = "drive_busy"; cd = 0; }   // open on this PC: not offered
         if (!first) sb_add(&j, ",", 1);
         first = 0;
         sb_add(&j, "{\"busid\":", 9); sb_jstr(&j, ids[i]);
         sb_add(&j, ",\"name\":", 8); sb_jstr(&j, dev_name(ids[i], name, sizeof name));
-        sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"peer\":", attr_hex(ids[i], "idVendor"), attr_hex(ids[i], "idProduct"), st, cd);
+        sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", attr_hex(ids[i], "idVendor"), attr_hex(ids[i], "idProduct"), st, cd, is_input_dev(ids[i]) ? "true" : "false");
         sb_jstr(&j, peer);
         sb_add(&j, "}", 1);
     }
@@ -354,6 +355,29 @@ static void handle_info(int s) {
     send_all(s, h, 12);
     send_all(s, j.p, j.len);
     sb_free(&j);
+}
+
+// Another PC asks to release a device from whichever PC is using it (for when the two PCs involved
+// can't sort it out themselves). It comes back to this PC, then is available again after the countdown.
+static void handle_kick(int s, const char *peer, const uint8_t *op) {
+    uint32_t len = (uint32_t)op[4] << 24 | (uint32_t)op[5] << 16 | (uint32_t)op[6] << 8 | op[7];
+    char busid[32];
+    uint8_t r[8] = {0};
+    put16b(r, USBIP_VERSION); put16b(r + 2, 0x0FE3);
+    struct timeval tv = { 2, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    if (len == 0 || len > 31 || recv_all(s, busid, len)) return;
+    busid[len] = 0;
+    HostDev *h = hdev(busid, 0);
+    if (!h || !h->exported) { put32b(r + 4, 1); send_all(s, r, 8); return; }
+    char name[256], pl[160], by[160];
+    peer_label(h->peer, pl, sizeof pl, 0);
+    peer_label(peer, by, sizeof by, 0);
+    return_to_host(busid);
+    h->exported = 0; h->blocked = 1; h->hold_until = time(NULL) + g_hold_secs; h->last_shown = 0;
+    logm("[%s] %s released from %s at the request of %s. It works on this PC again; other PCs may take it again in %d s.",
+         busid, dev_name(busid, name, sizeof name), pl, by, g_hold_secs);
+    send_all(s, r, 8);
 }
 
 static void *client_main(void *arg) {
@@ -521,10 +545,12 @@ static void add_local_json(sb_t *j) {
     for (int i = 0; i < n; i++) {
         const char *st, *peer, *note = ""; int cd;
         host_state(ids[i], &st, &peer, &cd);
-        int fixed = 0;
+        int fixed = 0, sys = 0;
+        const char *why = system_reason(ids[i]);
+        char nb[96] = "";
         if (strcmp(st, "in_use") && drive_mounted(ids[i])) { st = "hidden"; note = "drive in use by this PC, not shared"; fixed = 1; }
         else if (strcmp(st, "in_use") && is_hidden(ids[i])) st = "hidden";
-        else if (strcmp(st, "in_use") && is_radio(ids[i]) && !is_shared(ids[i])) { st = "hidden"; note = "Bluetooth/wireless adapter: shared only if you choose Share"; }
+        else if (strcmp(st, "in_use") && why && !is_shared(ids[i])) { st = "hidden"; sys = 1; snprintf(nb, sizeof nb, "%s: shared only if you choose Share", why); note = nb; }
         if (i) sb_add(j, ",", 1);
         sb_add(j, "{\"id\":", 6); sb_jstr(j, ids[i]);
         sb_add(j, ",\"name\":", 8); sb_jstr(j, dev_name(ids[i], name, sizeof name));
@@ -532,7 +558,7 @@ static void add_local_json(sb_t *j) {
         char pl[160] = ""; if (peer[0]) peer_label(peer, pl, sizeof pl, 0);
         sb_jstr(j, pl);
         sb_add(j, ",\"note\":", 8); sb_jstr(j, note);
-        sb_add(j, "}", 1);
+        sb_printf(j, ",\"system\":%s}", sys ? "true" : "false");
     }
     sb_add(j, "]", 1);
 }
@@ -632,7 +658,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     else if (!strcmp(op, "local_hide")) { set_hidden(id, 1); set_shared(id, 0); save_settings(); }
     else if (!strcmp(op, "local_share")) {
         if (drive_mounted(id)) { sb_printf(out, "%s", "{\"error\":\"This drive is in use by this PC. Unmount (eject) it first.\"}"); return 400; }
-        set_hidden(id, 0); if (is_radio(id)) set_shared(id, 1);
+        set_hidden(id, 0); if (system_reason(id)) set_shared(id, 1);
         if (h) { h->blocked = 0; h->hold_until = 0; }
         save_settings();
     }
@@ -746,6 +772,7 @@ static void *host_main(void *arg) {
                     if (code == OP_REQ_DEVLIST) handle_devlist(s, peer);
                     else if (code == OP_REQ_INFO) handle_info(s);
                     else if (code == OP_REQ_HELLO) handle_hello(s, peer, op);
+                    else if (code == OP_REQ_KICK) handle_kick(s, peer, op);
                     else if (code == OP_REQ_IMPORT) {
                         handle_import(s, peer);
                         struct timeval z = {0, 0};      // the kernel uses this connection now: no time limits

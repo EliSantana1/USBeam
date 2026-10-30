@@ -37,6 +37,7 @@
 #define OP_REQ_INFO 0x8FE1        // USBeam extension: device names and states as JSON
 #define OP_REP_INFO 0x0FE1
 #define OP_REQ_HELLO 0x8FE2       // USBeam extension: "this is me" (id + name), so both sides know each other
+#define OP_REQ_KICK 0x8FE3        // USBeam extension: release a device from whichever PC is using it
 #define CL_MAXR 16                // remote PCs
 #define CL_MAXA 6                 // addresses per PC
 #define CL_MAXRD 32               // devices per PC
@@ -45,7 +46,7 @@
 #include "client_types.h"
 static const char *NET_KEY[] = { "auto", "home", "zerotier", "tailscale" };
 static const char *NET_LABEL[] = { "Automatic", "Home network", "ZeroTier", "Tailscale" };
-typedef struct { char busid[32], name[128], vid[8], pid[8], state[16], peer[64]; int countdown; } RDev;
+typedef struct { char busid[32], name[128], vid[8], pid[8], state[16], peer[64]; int countdown, input; } RDev;
 typedef struct { char ip[64]; int kind, ok; } RAddr;
 typedef struct {
     char id[40], name[64];
@@ -64,13 +65,18 @@ typedef struct {
     int port;                   // local port while attached, -1 otherwise
     int want;                   // user clicked Use (keep it attached)
     int autorc, release;
+    int input;                  // a keyboard or mouse (Auto-release applies)
     unsigned long long next_try;
+    unsigned long long attached_at;   // when it was connected here (for Auto-release)
     char name[128], vid[8], pid[8];  // last seen details (shown if the PC drops off for a while)
 } Use;
 
 static Remote g_r[CL_MAXR];
 static Use g_use[CL_MAXW];
 static int g_netpref = NET_AUTO;
+static int g_show_hidden;         // "Show hidden devices" (built-in parts of this PC in This PC's Devices)
+static int g_input_warned;        // the one-time keyboard/mouse message was acknowledged
+static int g_input_release;       // minutes after which keyboards and mice used here are released (0 = never)
 
 void logm(const char *fmt, ...);
 
@@ -241,6 +247,7 @@ static int poll_pc(const char *ip, PollResult *out, int ms) {
             json_str(obj, "state", d->state, sizeof d->state);
             json_str(obj, "peer", d->peer, sizeof d->peer);
             const char *c = json_find(obj, "countdown"); d->countdown = c ? atoi(c) : 0;
+            d->input = json_bool(obj, "input");
             p = e + 1;
         }
         free(js);
@@ -358,6 +365,7 @@ static void client_tick(void) {
                     snprintf(u->name, sizeof u->name, "%s", r->dev[k].name);
                     snprintf(u->vid, sizeof u->vid, "%s", r->dev[k].vid);
                     snprintf(u->pid, sizeof u->pid, "%s", r->dev[k].pid);
+                    u->input = r->dev[k].input;
                 }
             }
             if (r->via < 0) {                    // unreachable: check less often (an announcement or introduction re-checks at once)
@@ -395,7 +403,7 @@ static void client_tick(void) {
             Remote *r = known ? NULL : rm_by_ip(aips[k]);
             Use *u = r ? use_new(r->id, abus[k]) : NULL;
             if (u && u->port < 0) {
-                u->port = ports[k]; u->want = 1; u->release = 0;
+                u->port = ports[k]; u->want = 1; u->release = 0; u->attached_at = now;
                 snprintf(u->ip, sizeof u->ip, "%s", aips[k]);
                 changed = 1;
             } else u = NULL;
@@ -413,6 +421,16 @@ static void client_tick(void) {
             if (u.port >= 0) plat_detach(u.port);
             plat_stop_retries();
             logm("[%s] released", u.busid);
+            cl_lock(); g_use[i].used = 0; cl_unlock();
+            changed = 1;
+            continue;
+        }
+        if (u.port >= 0 && u.input && g_input_release > 0 && u.attached_at &&
+            now - u.attached_at >= (unsigned long long)g_input_release * 60000ULL) {
+            // Auto-release for keyboards and mice (gear menu): give it back to its own PC.
+            logm("[%s] released automatically after %d minutes (keyboards and mice)", u.busid, g_input_release);
+            plat_detach(u.port);
+            plat_stop_retries();
             cl_lock(); g_use[i].used = 0; cl_unlock();
             changed = 1;
             continue;
@@ -452,6 +470,7 @@ static void client_tick(void) {
         cl_lock();
         if (g_use[i].used && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
             g_use[i].port = port;
+            if (port >= 0) g_use[i].attached_at = now;
             snprintf(g_use[i].ip, sizeof g_use[i].ip, "%s", ip);
             if (port < 0) {
                 g_use[i].next_try = now + 3000;
@@ -503,17 +522,20 @@ static void prefs_init(void) {     // call once after the computer's name is kno
 static void prefs_json(sb_t *j) {
     sb_add(j, "\"prefs\":{\"name\":", 16); sb_jstr(j, g_custom_name);
     sb_add(j, ",\"hostname\":", 12); sb_jstr(j, g_hostname);
-    sb_printf(j, ",\"hold\":%d,\"theme\":\"%s\",\"tray\":%s}", g_hold_secs, g_theme, g_tray_login ? "true" : "false");
+    sb_printf(j, ",\"hold\":%d,\"theme\":\"%s\",\"showhidden\":%s,\"inputwarned\":%s,\"inputrelease\":%d,\"tray\":%s}",
+              g_hold_secs, g_theme, g_show_hidden ? "true" : "false", g_input_warned ? "true" : "false", g_input_release, g_tray_login ? "true" : "false");
 }
 static void prefs_reset(void) {
     g_custom_name[0] = 0; prefs_apply_name();
     g_hold_secs = 10; snprintf(g_theme, sizeof g_theme, "system"); g_tray_login = 1;
+    g_show_hidden = 0; g_input_warned = 0; g_input_release = 0;
 }
 
 static void client_save_lines(FILE *f) {
     fprintf(f, "net %s\n", NET_KEY[g_netpref]);
     if (g_custom_name[0]) fprintf(f, "pcname\t%s\n", g_custom_name);
-    fprintf(f, "hold %d\ntheme %s\ntraylogin %d\n", g_hold_secs, g_theme, g_tray_login);
+    fprintf(f, "hold %d\ntheme %s\ntraylogin %d\nshowhidden %d\ninputwarned %d\ninputrelease %d\n",
+            g_hold_secs, g_theme, g_tray_login, g_show_hidden, g_input_warned, g_input_release);
     for (int i = 0; i < CL_MAXR; i++)
         if (g_r[i].id[0] && g_r[i].manual) for (int k = 0; k < g_r[i].naddr; k++) fprintf(f, "pc %s\n", g_r[i].addr[k].ip);
     for (int i = 0; i < CL_MAXW; i++)
@@ -561,6 +583,9 @@ static int client_load_line(const char *line) {
     int n;
     if (sscanf(line, "hold %d", &n) == 1) { if (n >= 3 && n <= 120) g_hold_secs = n; return 1; }
     if (sscanf(line, "traylogin %d", &n) == 1) { g_tray_login = n != 0; return 1; }
+    if (sscanf(line, "showhidden %d", &n) == 1) { g_show_hidden = n != 0; return 1; }
+    if (sscanf(line, "inputwarned %d", &n) == 1) { g_input_warned = n != 0; return 1; }
+    if (sscanf(line, "inputrelease %d", &n) == 1) { if (n >= 0 && n <= 240) g_input_release = n; return 1; }
     if (sscanf(line, "theme %7s", a) == 1) {
         if (!strcmp(a, "light") || !strcmp(a, "dark") || !strcmp(a, "system")) snprintf(g_theme, sizeof g_theme, "%s", a);
         return 1;
@@ -633,7 +658,7 @@ static void client_json(sb_t *j) {
             sb_add(j, ",\"name\":", 8); sb_jstr(j, d->name);
             sb_add(j, ",\"vid\":", 7); sb_jstr(j, d->vid);
             sb_add(j, ",\"pid\":", 7); sb_jstr(j, d->pid);
-            sb_printf(j, ",\"state\":\"%s\",\"countdown\":%d,\"auto\":%s,\"peer\":", st, d->countdown, (u && u->autorc) ? "true" : "false");
+            sb_printf(j, ",\"state\":\"%s\",\"countdown\":%d,\"auto\":%s,\"input\":%s,\"peer\":", st, d->countdown, (u && u->autorc) ? "true" : "false", d->input ? "true" : "false");
             char pl[160]; peer_label(d->peer, pl, sizeof pl, 1);
             sb_jstr(j, pl);
             sb_add(j, "}", 1);
@@ -693,6 +718,35 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         snprintf(g_theme, sizeof g_theme, "%s", val); client_save(); return 1;
     }
     if (!strcmp(op, "set_tray")) { g_tray_login = json_bool(body, "on"); client_save(); return 1; }
+    if (!strcmp(op, "set_showhidden")) { g_show_hidden = json_bool(body, "on"); client_save(); return 1; }
+    if (!strcmp(op, "set_inputwarned")) { g_input_warned = 1; client_save(); return 1; }
+    if (!strcmp(op, "set_inputrelease")) {
+        int n = atoi(val);
+        if (n < 0 || n > 240) { sb_printf(out, "%s", "{\"error\":\"Choose up to 240 minutes.\"}"); *code = 400; return 1; }
+        g_input_release = n; client_save(); return 1;
+    }
+    if (!strcmp(op, "kick")) {                 // release a device that another PC is using (done by the PC it's plugged into)
+        char ip[64] = "", nm[64] = "";
+        cl_lock();
+        Remote *r = rm_find(pc);
+        if (r && r->via >= 0) { snprintf(ip, sizeof ip, "%s", r->addr[r->via].ip); snprintf(nm, sizeof nm, "%s", r->name); }
+        cl_unlock();
+        if (!ip[0] || !busid[0]) { sb_printf(out, "%s", "{\"error\":\"That PC can't be reached right now.\"}"); *code = 400; return 1; }
+        int st = -1;
+        plat_sock s = plat_connect(ip, 2000);
+        if (s != PLAT_BAD_SOCK) {
+            uint8_t h[8];
+            uint32_t len = (uint32_t)strlen(busid);
+            cl_op(h, OP_REQ_KICK);
+            h[4] = (uint8_t)(len >> 24); h[5] = (uint8_t)(len >> 16); h[6] = (uint8_t)(len >> 8); h[7] = (uint8_t)len;
+            if (!plat_send(s, h, 8) && !plat_send(s, busid, (int)len) && !plat_recv(s, h, 8)) st = (int)cl_g32(h + 4);
+            plat_close(s);
+        }
+        if (st < 0) { sb_printf(out, "%s", "{\"error\":\"That PC didn't answer. Is USBeam up to date there?\"}"); *code = 400; return 1; }
+        logm("[%s] asked %s to release it from the PC using it", busid, nm);
+        cl_lock(); r = rm_find(pc); if (r) r->next_poll = 0; cl_unlock();
+        return 1;
+    }
     if (!strcmp(op, "reset_client")) {         // part of "Reset USBeam": let go of everything, forget PCs and settings
         cl_lock();
         for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used) { g_use[i].release = 1; g_use[i].autorc = 0; g_use[i].want = 0; }
@@ -742,6 +796,17 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         if (note && strcmp(op, "release")) { sb_add(out, "{\"error\":", 9); sb_jstr(out, note); sb_add(out, "}", 1); *code = 400; return 1; }
         int on = json_bool(body, "on");
         cl_lock();
+        if (!strcmp(op, "auto") && on) {          // only the PC using a device decides about its Auto-reconnect
+            Use *cur = use_find(pc, busid);
+            Remote *r = rm_find(pc);
+            int busy = 0;
+            if (r) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, busid) && !strcmp(r->dev[k].state, "in_use")) busy = 1;
+            if (busy && !(cur && (cur->port >= 0 || cur->autorc))) {
+                cl_unlock();
+                sb_printf(out, "%s", "{\"error\":\"Another PC is using this device. Only that PC can set Auto-reconnect for it.\"}");
+                *code = 400; return 1;
+            }
+        }
         Use *u = (!strcmp(op, "use") || (!strcmp(op, "auto") && on)) ? use_new(pc, busid) : use_find(pc, busid);
         if (u) {
             if (!strcmp(op, "release")) u->release = 1;
@@ -753,6 +818,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
                     snprintf(u->name, sizeof u->name, "%s", r->dev[k].name);
                     snprintf(u->vid, sizeof u->vid, "%s", r->dev[k].vid);
                     snprintf(u->pid, sizeof u->pid, "%s", r->dev[k].pid);
+                    u->input = r->dev[k].input;
                 }
             }
         }

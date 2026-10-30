@@ -265,6 +265,7 @@ static const char *local_state(Dev *d, int *countdown) {
     if (d->busy) return "switching";
     if (d->in_use) return "in_use";
     if (!d->wanted) return "hidden";
+    if (d->drive_busy_until && GetTickCount64() < d->drive_busy_until) return "drive_busy";
     if (d->hold_until) {
         LONGLONG left = (LONGLONG)(d->hold_until - GetTickCount64());
         *countdown = left > 0 ? (int)((left + 999) / 1000) : 0;
@@ -303,7 +304,8 @@ static void handle_info(SOCKET s) {
         first = 0;
         sb_add(&j, "{\"busid\":", 9); sb_jstr(&j, d->busid);
         sb_add(&j, ",\"name\":", 8); sb_jstr(&j, name);
-        sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"peer\":", d->vid, d->pid, st, cd);
+        int input = d->have_desc && devp_is_input((const unsigned char (*)[3])d->iface_class, d->num_ifaces);
+        sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", d->vid, d->pid, st, cd, input ? "true" : "false");
         sb_jstr(&j, d->in_use ? d->peer : "");
         sb_add(&j, "}", 1);
     }
@@ -581,8 +583,11 @@ static void add_local_json(sb_t *j) {
         Dev *d = &g_devs[i];
         if (!d->used || !d->present || !d->removable) continue;
         int cd; const char *st = local_state(d, &cd);
+        int sys = !d->in_use && !d->share_forced && (d->is_radio || d->is_light);
         const char *note = d->is_net ? "network adapter, never shared" :
-                           (d->is_storage && !d->share_forced && !d->in_use) ? (d->is_radio ? "Bluetooth/wireless adapter: shared only if you choose Share" : "drive: shared only if you choose Share") : "";
+                           ((d->is_storage || d->is_light) && !d->share_forced && !d->in_use) ?
+                               (d->is_radio ? "Bluetooth/wireless adapter: shared only if you choose Share" :
+                                d->is_light ? "lighting controller: shared only if you choose Share" : "drive: shared only if you choose Share") : "";
         char name[512]; w2u(d->name, name, sizeof name);
         if (!first) sb_add(j, ",", 1);
         first = 0;
@@ -593,7 +598,7 @@ static void add_local_json(sb_t *j) {
         char pl[160] = ""; if (d->in_use) peer_label(d->peer, pl, sizeof pl, 0);
         sb_jstr(j, pl);
         sb_add(j, ",\"note\":", 8); sb_jstr(j, note);
-        sb_add(j, "}", 1);
+        sb_printf(j, ",\"system\":%s}", sys ? "true" : "false");
     }
     LeaveCriticalSection(&g_devs_cs);
     sb_add(j, "]", 1);
@@ -674,7 +679,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     else if (!strcmp(op, "local_share")) {
         if (d) {
             if (d->is_net) { sb_printf(out, "%s", "{\"error\":\"Network adapters can't be shared: USBeam itself may depend on them.\"}"); return 400; }
-            d->hidden = 0; d->share_forced = d->is_storage; d->blocked = 0; d->hold_until = 0; save_config();
+            d->hidden = 0; d->share_forced = d->is_storage || d->is_light; d->blocked = 0; d->hold_until = 0; save_config();
         }
     }
     else if (!strcmp(op, "local_disconnect")) { if (d && d->in_use) { d->blocked = 1; say("[%s] taking %ls back from %s", d->busid, d->name, d->peer); end_session(d); } }

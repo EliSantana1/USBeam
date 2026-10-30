@@ -72,6 +72,7 @@ nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0
 .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.accent { color: var(--accent); } .pill.bad { color: var(--bad); }
 .auto { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); cursor: pointer; min-height: 36px; user-select: none; }
 .auto input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.auto.off { opacity: .5; cursor: not-allowed; } .auto.off input { cursor: not-allowed; }
 .btn { min-width: 92px; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-weight: 600; font-size: 13px; cursor: pointer; }
 .btn:hover { border-color: var(--muted); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
@@ -143,6 +144,11 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
     <div class="sec"><div class="line" style="justify-content:space-between"><span class="lbl" style="margin:0">Countdown after a device is plugged back in</span>
       <select id="holdsel" onchange="act({op:'set_hold', value:this.value})"></select></div>
       <div class="small">How long other PCs wait before they may take a replugged device again.</div></div>
+    <div class="sec"><label class="auto" style="min-height:0"><input type="checkbox" id="hiddenchk" onchange="act({op:'set_showhidden', on:this.checked})">Show hidden devices</label>
+      <div class="small">Parts built into this PC (lighting controllers, wireless adapters and the like) are hidden from This PC's Devices and not shared, unless you choose Share.</div></div>
+    <div class="sec"><div class="line" style="justify-content:space-between"><span class="lbl" style="margin:0">Release keyboards and mice used here</span>
+      <select id="inputrelsel" onchange="act({op:'set_inputrelease', value:this.value})"><option value="0">Never</option><option value="15">After 15 minutes</option><option value="30">After 30 minutes</option><option value="60">After 1 hour</option><option value="120">After 2 hours</option></select></div>
+      <div class="small">A safety net: gives a keyboard or mouse back to its own PC after this time.</div></div>
     <div class="sec"><div class="line" style="justify-content:space-between"><span class="lbl" style="margin:0">Theme</span>
       <select id="themesel" onchange="act({op:'set_theme', value:this.value})"><option value="system">Same as system</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
     <div class="sec" style="padding:4px 0">
@@ -151,6 +157,7 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
       <button class="item" onclick="restartUsbeam()">Restart USBeam</button>
       <button class="item" onclick="saveDiagnostics()">Save diagnostics</button>
       <button class="item" onclick="confirmReset()">Reset USBeam…</button>
+      <button class="item" onclick="showSecurity()">About network security</button>
       <button class="item" onclick="showAbout()">About USBeam</button>
     </div>
     <div class="sec" style="padding:4px 0"><button class="item danger" onclick="confirmUninstall()">Uninstall USBeam…</button></div>
@@ -217,8 +224,38 @@ async function act(body) {
 }
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
-  if (b && b.tagName !== 'INPUT') act(JSON.parse(b.dataset.act));
+  if (!b || b.tagName === 'INPUT') return;
+  const a = JSON.parse(b.dataset.act);
+  if (b.dataset.pre === 'kick') return confirmKick(a);
+  if (b.dataset.pre === 'input' && !(S.prefs && S.prefs.inputwarned)) return inputWarning(a);
+  act(a);
 });
+let pendingAct = null;
+function runPending() { const a = pendingAct; pendingAct = null; closeModal(); if (a) act(a); }
+// Release a device another PC is using (the PC it's plugged into does it).
+function confirmKick(a) {
+  pendingAct = a;
+  modal(`<h3>Release ${esc(a._dev)}?</h3>
+    <p>${esc(a._peer)} is using it. It goes back to ${esc(a._pc)}, and other PCs may use it again after the countdown.</p>
+    <p>Use this if the two PCs can't sort it out themselves, for example when one of them stopped responding.</p>
+    <div class="acts"><button class="btn" onclick="pendingAct=null;closeModal()">Cancel</button><button class="btn primary" onclick="runPending()">Release</button></div>`);
+}
+// Keyboards and mice: shown once, before the first one is used from another PC.
+function inputWarning(a) {
+  pendingAct = a;
+  modal(`<h3>Using a keyboard or mouse from another PC</h3>
+    <p>While you use ${esc(a._dev)} here, it stops working on ${esc(a._pc)}. If it's the only keyboard or mouse there, that PC can't be controlled until the device is released.</p>
+    <p>You can release it from this PC at any time. As a safety net, the gear menu can release keyboards and mice automatically after a set time.</p>
+    <p class="small">This message is shown only once.</p>
+    <div class="acts"><button class="btn" onclick="pendingAct=null;closeModal()">Cancel</button><button class="btn primary" onclick="act({op:'set_inputwarned'}).then(runPending)">I understand</button></div>`);
+}
+function showSecurity() {
+  toggleMenu();
+  modal(`<h3>About network security</h3>
+    <p>USBeam only works on networks you allow: on Windows, networks marked Private; on Linux, networks you allowed; and ZeroTier and Tailscale, which are always on.</p>
+    <p>Device data travels between PCs using USB/IP, the standard USBeam is built on. It is not encrypted by USBeam itself. On your own home network that's normally fine. ZeroTier and Tailscale encrypt everything they carry, so when you're away from home, connecting over them keeps device data private.</p>
+    <div class="acts"><button class="btn primary" onclick="closeModal()">Close</button></div>`);
+}
 document.addEventListener('change', e => {
   const b = e.target.closest('input[data-act]');
   if (b) act(Object.assign(JSON.parse(b.dataset.act), { on: b.checked }));
@@ -237,16 +274,20 @@ function remoteRow(pc, d) {
     case 'waiting': label = 'Waiting to reconnect'; kind = 'warn'; break;
     case 'countdown': label = 'Back in ' + d.countdown + ' s'; kind = 'warn'; break;
     case 'busy': label = 'In use by ' + (d.peer || 'another PC'); kind = 'warn'; break;
+    case 'drive_busy': label = 'Files open on its PC'; kind = 'warn'; break;
     case 'kept': label = 'Kept on its PC'; kind = ''; break;
   }
   let btn = '<span class="noact">—</span>';
+  const info = { _pc: pc.name, _dev: d.name || 'USB device', _peer: d.peer || 'another PC' };
   if (['mine', 'connecting', 'waiting', 'countdown'].includes(d.state)) btn = `<button class="btn" data-act="${attr(Object.assign({ op: 'release' }, key))}">Release</button>`;
-  else if (d.state === 'available') btn = `<button class="btn primary" data-act="${attr(Object.assign({ op: 'use' }, key))}">Use</button>`;
+  else if (d.state === 'available') btn = `<button class="btn primary" data-pre="${d.input ? 'input' : ''}" data-act="${attr(Object.assign({ op: 'use' }, key, info))}">Use</button>`;
+  else if (d.state === 'busy') btn = `<button class="btn" data-pre="kick" data-act="${attr(Object.assign({ op: 'kick' }, key, info))}" title="Release it from the PC using it">Release</button>`;
+  const locked = (d.state === 'busy' || d.state === 'drive_busy') && !d.auto;   // only the PC using it decides (unticking stays possible)
   const sub = [d.vid && d.pid ? d.vid + ':' + d.pid : '', d.busid].filter(Boolean).join(' · ');
   return `<div class="row"><div class="dicon">${ICON}</div>
     <div class="dinfo"><div class="dname">${esc(d.name || 'USB device')}</div><div class="dsub">${esc(sub)}</div></div>
     <span class="pill ${kind}">${esc(label)}</span>
-    <label class="auto"><input type="checkbox" ${d.auto ? 'checked' : ''} data-act="${attr(Object.assign({ op: 'auto' }, key))}">Auto-reconnect</label>
+    <label class="auto${locked ? ' off' : ''}" ${locked ? 'title="Set by the PC using this device"' : ''}><input type="checkbox" ${d.auto ? 'checked' : ''} ${locked ? 'disabled' : ''} data-act="${attr(Object.assign({ op: 'auto' }, key))}">Auto-reconnect</label>
     ${btn}</div>`;
 }
 function renderPcs(s) {
@@ -305,9 +346,13 @@ function renderNetInfo(s) {
   }
   document.getElementById('menunets').innerHTML = t || '<div class="small">No networks.</div>';
 }
-function renderLocal(list) {
+function renderLocal(all) {
   const el = document.getElementById('local');
-  if (!list.length) { el.innerHTML = '<div class="row"><span class="dsub">No USB devices found.</span></div>'; return; }
+  const showHidden = !!(S.prefs && S.prefs.showhidden);
+  const list = showHidden ? all : all.filter(d => !d.system);
+  const nHidden = all.length - list.length;
+  const tail = nHidden ? `<div class="row"><span class="dsub">${nHidden} built-in ${nHidden === 1 ? 'part' : 'parts'} of this PC hidden. To see ${nHidden === 1 ? 'it' : 'them'}: gear menu → Show hidden devices.</span></div>` : '';
+  if (!list.length) { el.innerHTML = '<div class="row"><span class="dsub">No USB devices plugged in.</span></div>' + tail; return; }
   el.innerHTML = list.map(d => {
     const id = { id: d.id };
     const M = {
@@ -324,7 +369,7 @@ function renderLocal(list) {
     return `<div class="row"><div class="dicon">${ICON}</div>
       <div class="dinfo"><div class="dname">${esc(d.name)}</div><div class="dsub">${esc(sub)}</div></div>
       <span class="pill ${M[1]}">${esc(label)}</span>${btn}</div>`;
-  }).join('');
+  }).join('') + tail;
 }
 
 // ---------------------------------------------------------------- gear menu
@@ -403,7 +448,7 @@ document.addEventListener('keydown', e => {
 }, true);
 window.addEventListener('resize', cselClose);
 document.addEventListener('scroll', e => { if (cselOpenId && !e.target.closest?.('#csellist')) cselClose(); }, true);
-['net', 'holdsel', 'themesel'].forEach(cselMake);
+['net', 'holdsel', 'themesel', 'inputrelsel'].forEach(cselMake);
 
 let lastPrefs = '';
 function applyPrefs(s) {
@@ -416,6 +461,10 @@ function applyPrefs(s) {
   document.getElementById('themesel').value = p.theme || 'system';
   cselSync(document.getElementById('themesel'));
   document.getElementById('traychk').checked = p.tray !== false;
+  document.getElementById('hiddenchk').checked = !!p.showhidden;
+  document.getElementById('inputrelsel').value = String(p.inputrelease || 0);
+  cselSync(document.getElementById('inputrelsel'));
+  lastLocal = '';
   document.getElementById('pcnamehint').textContent = 'The name other PCs see. Leave empty to use the computer\'s name (' + (p.hostname || '') + ').';
   const hs = document.getElementById('holdsel'), opts = [5, 10, 15, 30, 60];
   if (p.hold && !opts.includes(p.hold)) opts.push(p.hold);

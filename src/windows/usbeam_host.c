@@ -31,6 +31,8 @@
 #include <initguid.h>
 #include <devpkey.h>
 #include <winusb.h>
+#include <winioctl.h>
+#include "../common/devpolicy.h"
 // From usbioctl.h (not included: its names clash with winusb.h)
 #define IOCTL_USB_HUB_CYCLE_PORT CTL_CODE(FILE_DEVICE_UNKNOWN, 273, METHOD_BUFFERED, FILE_ANY_ACCESS)
 typedef struct { ULONG ConnectionIndex; ULONG StatusReturned; } USB_CYCLE_PORT_PARAMS;
@@ -155,6 +157,8 @@ typedef struct Dev {
     int auto_rc;             // (unused, kept for compatibility)
     int is_net, is_storage;  // network adapter / opt-in device: drive or radio (set by refresh)
     int is_radio;            // Bluetooth / wireless adapter (opt-in like drives)
+    int is_light;            // lighting (RGB/LED) controller (opt-in like drives)
+    ULONGLONG drive_busy_until; // a drive refused to go because files are open on this PC (shown for a while)
     int hidden, share_forced;// user's choice: "Don't share" / "Share" (drives)
     int blocked;             // temporarily kept on this PC (refuse clients)
     int returning;           // was unplugged during a session; give back to PC when it returns
@@ -303,7 +307,12 @@ static void refresh_devices(void) {
         if (!SetupDiGetDevicePropertyW(set, &dev, &DEVPKEY_Device_BusReportedDeviceDesc, &t, (BYTE *)d->name, sizeof d->name, NULL, 0) || !d->name[0])
             get_prop(set, &dev, SPDRP_DEVICEDESC, d->name, sizeof d->name);
         classify_device(d, svc);
-        d->wanted = !d->is_net && !d->hidden && (!d->is_storage || d->share_forced);
+        if (!d->in_use && !d->busy && !d->on_winusb) {      // lighting controller? (decided before any driver switch)
+            char nm[512]; WideCharToMultiByte(CP_UTF8, 0, d->name, -1, nm, sizeof nm, NULL, NULL);
+            if (!d->have_desc && d->removable && devp_is_lighting(nm, d->vid, d->pid, NULL, 0, 0)) hub_descriptors(d);
+            d->is_light = devp_is_lighting(nm, d->vid, d->pid, (const unsigned char (*)[3])d->iface_class, d->num_ifaces, d->have_desc);
+        }
+        d->wanted = !d->is_net && !d->hidden && (!(d->is_storage || d->is_light) || d->share_forced);
         if (d->wanted && d->removable && !d->have_desc && !d->in_use && !d->busy) hub_descriptors(d);
     }
     if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
@@ -392,6 +401,66 @@ static BOOL read_descriptors(Dev *d) {
     BOOL ok = open_usb(d);
     close_usb(d);
     return ok;
+}
+
+// ================================================================ drives in use
+// A drive with files open on this PC must not be pulled away: the files would be damaged.
+// Before sharing a drive, each of its volumes is locked (only possible when nothing has files
+// open on it) and dismounted, which also writes out anything Windows still had to save.
+static const GUID GUID_DISK_IF = {0x53f56307, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b}};
+static int drive_disks(Dev *d, DWORD *nums, int max) {
+    DEVINST root;
+    if (CM_Locate_DevNodeW(&root, (DEVINSTID_W)d->inst, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return 0;
+    HDEVINFO set = SetupDiGetClassDevsW(&GUID_DISK_IF, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (set == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    SP_DEVICE_INTERFACE_DATA ifd = { sizeof ifd };
+    for (DWORD i = 0; n < max && SetupDiEnumDeviceInterfaces(set, NULL, &GUID_DISK_IF, i, &ifd); i++) {
+        union { SP_DEVICE_INTERFACE_DETAIL_DATA_W d; BYTE b[2048]; } det;
+        det.d.cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        SP_DEVINFO_DATA dv = { sizeof dv };
+        if (!SetupDiGetDeviceInterfaceDetailW(set, &ifd, &det.d, sizeof det, NULL, &dv)) continue;
+        DEVINST x = dv.DevInst, p; int under = 0;
+        for (int k = 0; k < 6 && CM_Get_Parent(&p, x, 0) == CR_SUCCESS; k++, x = p) if (p == root) { under = 1; break; }
+        if (!under) continue;
+        HANDLE h = CreateFileW(det.d.DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        STORAGE_DEVICE_NUMBER sdn; DWORD got;
+        if (DeviceIoControl(h, IOCTL_STORAGE_GET_DEVICE_NUMBER, NULL, 0, &sdn, sizeof sdn, &got, NULL)) nums[n++] = sdn.DeviceNumber;
+        CloseHandle(h);
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    return n;
+}
+// Returns 1 if files are open on the drive (leave it alone), 0 if it may be shared.
+static int drive_in_use(Dev *d) {
+    DWORD disks[8];
+    int nd = drive_disks(d, disks, 8);
+    if (!nd) return 0;
+    for (int attempt = 0; attempt < 5; attempt++) {     // Explorer may hold the drive for a moment
+        HANDLE locked[16]; int nl = 0, busy = 0;
+        wchar_t vol[MAX_PATH];
+        HANDLE f = FindFirstVolumeW(vol, MAX_PATH);
+        for (BOOL more = f != INVALID_HANDLE_VALUE; more && !busy; more = FindNextVolumeW(f, vol, MAX_PATH)) {
+            size_t L = wcslen(vol);
+            if (L && vol[L - 1] == L'\\') vol[L - 1] = 0;
+            HANDLE h = CreateFileW(vol, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            union { VOLUME_DISK_EXTENTS v; BYTE b[512]; } ex;
+            DWORD got; int mine = 0;
+            if (DeviceIoControl(h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, &ex, sizeof ex, &got, NULL))
+                for (DWORD k = 0; k < ex.v.NumberOfDiskExtents; k++) for (int m = 0; m < nd; m++) if (ex.v.Extents[k].DiskNumber == disks[m]) mine = 1;
+            if (!mine) { CloseHandle(h); continue; }
+            if (!DeviceIoControl(h, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &got, NULL)) { busy = 1; CloseHandle(h); break; }
+            DeviceIoControl(h, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &got, NULL);
+            if (nl < 16) locked[nl++] = h; else CloseHandle(h);
+        }
+        if (f != INVALID_HANDLE_VALUE) FindVolumeClose(f);
+        for (int i = 0; i < nl; i++) CloseHandle(locked[i]);
+        if (!busy) return 0;
+        Sleep(400);
+    }
+    return 1;
 }
 
 // ================================================================ share / unshare
@@ -865,6 +934,9 @@ static void urb_loop(Dev *d) {
 #define OP_REQ_INFO 0x8FE1        // USBeam extension: device names and states as JSON
 #define OP_REP_INFO 0x0FE1
 #define OP_REQ_HELLO 0x8FE2       // USBeam extension: another PC introduces itself
+#define OP_REQ_KICK 0x8FE3        // USBeam extension: release a device from whichever PC is using it
+static int g_hold_secs;            // (app_win.c)
+static void peer_label(const char *ip, char *out, size_t n, int cl_held);
 static void handle_info(SOCKET s);
 static void handle_hello(SOCKET s, const char *peer, const uint8_t *op);
 typedef struct { SOCKET s; char peer[64]; } Conn;
@@ -886,6 +958,29 @@ static DWORD WINAPI conn_main(LPVOID arg) {
 
     if (code == OP_REQ_INFO) { handle_info(s); goto done; }
     if (code == OP_REQ_HELLO) { handle_hello(s, c->peer, op); goto done; }
+    if (code == OP_REQ_KICK) {      // another PC asks to release a device from whichever PC is using it
+        uint32_t len = get32(op + 4);
+        char busid[32] = {0};
+        uint8_t r[8] = {0};
+        put16(r, USBIP_VERSION); put16(r + 2, 0x0FE3);
+        DWORD to = 2000; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof to);
+        if (len == 0 || len > 31 || !recv_all(s, busid, (int)len)) goto done;
+        EnterCriticalSection(&g_devs_cs);
+        Dev *d = NULL;
+        for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use && !strcmp(g_devs[i].busid, busid)) d = &g_devs[i];
+        if (d) { d->blocked = 1; d->hold_until = GetTickCount64() + (ULONGLONG)g_hold_secs * 1000; d->last_shown = 0; }
+        LeaveCriticalSection(&g_devs_cs);
+        put32(r + 4, d ? 0 : 1);
+        send_all(s, r, 8);
+        if (d) {
+            char pl[160], by[160];
+            peer_label(d->peer, pl, sizeof pl, 0);
+            peer_label(c->peer, by, sizeof by, 0);
+            say("[%s] %ls released from %s at the request of %s. Other PCs may take it again in %d s.", d->busid, d->name, pl, by, g_hold_secs);
+            end_session(d);
+        }
+        goto done;
+    }
     if (code == OP_REQ_DEVLIST) {
         refresh_devices();
         EnterCriticalSection(&g_devs_cs);
@@ -920,6 +1015,13 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         }
         LeaveCriticalSection(&g_devs_cs);
         d->quit = 0;
+        if (d->is_storage && !d->is_radio && !d->on_winusb && drive_in_use(d)) {
+            d->drive_busy_until = GetTickCount64() + 20000;
+            put32(r + 4, ST_NA); send_all(s, r, 8);
+            InterlockedExchange(&d->in_use, 0);
+            say("[%s] %s asked for %ls, but files are open on it on this PC. It stays here until they're closed.", d->busid, c->peer, d->name);
+            goto done;
+        }
         if (!d->on_winusb) {
             say("[%s] %s wants %ls: switching it to the sharing driver...", d->busid, c->peer, d->name);
             InterlockedExchange(&d->busy, 1);

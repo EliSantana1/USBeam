@@ -22,6 +22,7 @@
 #include <glob.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include "../common/devpolicy.h"
 
 #define USBDEV "/sys/bus/usb/devices"
 #define STUB "/sys/bus/usb/drivers/usbip-host"
@@ -252,11 +253,41 @@ static int drive_mounted(const char *busid) {
     return mounted;
 }
 
+// Interfaces as (class, subclass, protocol) triplets.
+static int dev_ifaces(const char *busid, unsigned char ifc[][3], int max) {
+    int n = (int)attr_dec(busid, "bNumInterfaces");
+    if (n > max) n = max;
+    if (n > 32) n = 32;
+    uint8_t raw[4 * 32];
+    iface_classes(busid, raw, n);
+    for (int i = 0; i < n; i++) { ifc[i][0] = raw[i * 4]; ifc[i][1] = raw[i * 4 + 1]; ifc[i][2] = raw[i * 4 + 2]; }
+    return n;
+}
+static int is_input_dev(const char *busid) {
+    unsigned char ifc[32][3]; int n = dev_ifaces(busid, ifc, 32);
+    return devp_is_input((const unsigned char (*)[3])ifc, n);
+}
+// Part of the PC itself rather than plugged into it: hidden unless the user chooses Share.
+// Returns why, or NULL for an ordinary plug-in device.
+static const char *system_reason(const char *busid) {
+    if (is_radio(busid)) return "Bluetooth/wireless adapter";
+    char name[256], m[128], p[128];
+    read_attr(busid, "manufacturer", m, sizeof m);
+    read_attr(busid, "product", p, sizeof p);
+    snprintf(name, sizeof name, "%s %s", m, p);
+    unsigned char ifc[32][3]; int n = dev_ifaces(busid, ifc, 32);
+    if (devp_is_lighting(name, attr_hex(busid, "idVendor"), attr_hex(busid, "idProduct"), (const unsigned char (*)[3])ifc, n, 1))
+        return "lighting controller";
+    char rem[16]; read_attr(busid, "removable", rem, sizeof rem);
+    if (!strcmp(rem, "fixed")) return "built into this PC";
+    return NULL;
+}
+
 static int offerable(const char *busid) {
     HostDev *h = hdev(busid, 0);
     if (!shareable(busid)) return 0;
     if (is_hidden(busid) || drive_mounted(busid)) return 0;
-    if (is_radio(busid) && !is_shared(busid)) return 0;
+    if (system_reason(busid) && !is_shared(busid)) return 0;
     if (h && (h->exported || h->blocked)) return 0;
     return 1;
 }
