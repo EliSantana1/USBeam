@@ -438,7 +438,7 @@ static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) 
     return n;
 }
 static const char *plat_client_note(void) {
-    return have_usbip() ? NULL : "To use devices from other PCs on this Windows PC, the usbip-win2 driver is needed (github.com/vadimgrn/usbip-win2). The USBeam installer will include it.";
+    return have_usbip() ? NULL : "To use devices from other PCs on this Windows PC, the usbip-win2 driver is needed (github.com/vadimgrn/usbip-win2). Install USBeam again: its installer includes it.";
 }
 
 static DWORD WINAPI client_main(LPVOID arg) {

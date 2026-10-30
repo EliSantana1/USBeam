@@ -3,7 +3,11 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.3.7"
+#define AppVersion "0.3.8"
+; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled, installed when
+; missing or older (github.com/vadimgrn/usbip-win2, BSD-2-Clause, see THIRD-PARTY.txt).
+#define UsbipVersion "0.9.8.1"
+#define UsbipAppId "{199505b0-b93d-4521-a8c7-897818e0205a}"
 
 [Setup]
 AppId={{6D2C1B54-7E7A-4F1B-9B5D-3E1F0A9C5B21}
@@ -38,6 +42,9 @@ Source: "..\..\build\usbeam-service-x64.exe"; DestDir: "{app}"; DestName: "usbea
 Source: "..\..\build\usbeam-app-x64.exe"; DestDir: "{app}"; DestName: "USBeam.exe"; Check: not IsArm64; Flags: ignoreversion
 Source: "..\..\build\webview2\x64\WebView2Loader.dll"; DestDir: "{app}"; Check: not IsArm64; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD-PARTY.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\build\usbip\USBip-{#UsbipVersion}-arm64.exe"; Flags: dontcopy nocompression
+Source: "..\..\build\usbip\USBip-{#UsbipVersion}-x64.exe"; Flags: dontcopy nocompression
 
 [Icons]
 Name: "{autoprograms}\USBeam"; Filename: "{app}\USBeam.exe"
@@ -74,6 +81,93 @@ Type: filesandordirs; Name: "{commonappdata}\USBeam"
 Type: filesandordirs; Name: "{localappdata}\USBeam"
 
 [Code]
+var
+  UsbipInstalledNow: Boolean;
+
+// "0.9.8.1" -> comparable parts; returns <0, 0, >0 like strcmp.
+function CompareVersions(A, B: String): Integer;
+var
+  PA, PB, NA, NB: Integer;
+begin
+  Result := 0;
+  while (Result = 0) and ((A <> '') or (B <> '')) do
+  begin
+    PA := Pos('.', A); if PA = 0 then PA := Length(A) + 1;
+    PB := Pos('.', B); if PB = 0 then PB := Length(B) + 1;
+    NA := StrToIntDef(Copy(A, 1, PA - 1), 0);
+    NB := StrToIntDef(Copy(B, 1, PB - 1), 0);
+    Delete(A, 1, PA); Delete(B, 1, PB);
+    if NA < NB then Result := -1 else if NA > NB then Result := 1;
+  end;
+end;
+
+// usbip-win2 is missing or older than the bundled version. One installed some other way
+// (no version known) is left alone.
+function UsbipNeeded(): Boolean;
+var
+  Ver: String;
+begin
+  if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1', 'DisplayVersion', Ver) then
+    Result := CompareVersions(Ver, '{#UsbipVersion}') < 0
+  else
+    Result := not FileExists(ExpandConstant('{commonpf64}\USBip\usbip.exe'));
+end;
+
+procedure InstallUsbip();
+var
+  F: String;
+  Code: Integer;
+begin
+  if IsArm64 then F := 'USBip-{#UsbipVersion}-arm64.exe' else F := 'USBip-{#UsbipVersion}-x64.exe';
+  WizardForm.StatusLabel.Caption := 'Installing the usbip-win2 driver (lets this PC use devices from other PCs)...';
+  ExtractTemporaryFile(F);
+  // Its own installer, silently: main program + client driver + Visual C++ runtime only.
+  Exec(ExpandConstant('{tmp}\') + F, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist"',
+       '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Log('usbip-win2 installer exit code ' + IntToStr(Code));
+  if FileExists(ExpandConstant('{commonpf64}\USBip\usbip.exe')) then
+  begin
+    UsbipInstalledNow := True;
+    // Remember that USBeam installed it, so uninstalling USBeam removes it again.
+    RegWriteDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', 1);
+  end
+  else
+    SuppressibleMsgBox('The usbip-win2 driver could not be installed (code ' + IntToStr(Code) + ').' + #13#13 +
+      'USBeam can still share this PC''s devices. To use devices from other PCs here, install usbip-win2 from ' +
+      'github.com/vadimgrn/usbip-win2.', mbError, MB_OK, IDOK);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and UsbipNeeded() then InstallUsbip();
+end;
+
+// A freshly installed driver works after Windows restarts.
+function NeedRestart(): Boolean;
+begin
+  Result := UsbipInstalledNow;
+end;
+
+// Uninstalling: remove usbip-win2 too, but only if USBeam installed it.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Flag: Cardinal;
+  Unins: String;
+  Code: Integer;
+begin
+  if CurUninstallStep <> usPostUninstall then Exit;
+  if RegQueryDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', Flag) and (Flag = 1) then
+  begin
+    if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1', 'UninstallString', Unins) then
+    begin
+      Unins := RemoveQuotes(Unins);
+      if FileExists(Unins) then
+        Exec(Unins, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    end;
+  end;
+  RegDeleteKeyIncludingSubkeys(HKLM64, 'SOFTWARE\USBeam');
+end;
+
 // Stop the running service and app before replacing their files (upgrades).
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var

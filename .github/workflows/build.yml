@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Builds USBeam on every push:
 #   - Windows installer (x64 + ARM64 in one setup program)
-#   - Linux AppImage (most distributions with systemd)
-#   - Linux package for Arch-based systems
-# Pushing a tag like v0.3.0 also publishes a GitHub Release with the files.
+#   - Linux package for Arch-based systems (CachyOS, EndeavourOS, Manjaro, Arch)
+#   - a static Linux engine binary for testing
+# Pushing a tag like v0.2.0 also publishes a GitHub Release with the files.
 name: build
 
 on:
@@ -33,7 +33,7 @@ jobs:
       - name: Get the WebView2 SDK
         run: make webview2
       - name: Build
-        run: make windows-arm64 windows-x64
+        run: make windows-arm64 windows-x64 linux
       - uses: actions/upload-artifact@v4
         with:
           name: windows-binaries
@@ -41,6 +41,7 @@ jobs:
             build/usbeam-service-*.exe
             build/usbeam-app-*.exe
             build/webview2/
+            build/usbeam
 
   windows-installer:
     needs: windows-binaries
@@ -53,6 +54,20 @@ jobs:
           path: build
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
+      - name: Get usbip-win2 (bundled driver, checked against its published checksums)
+        shell: pwsh
+        run: |
+          $v = "0.9.8.1"
+          $files = @{
+            "USBip-$v-x64.exe"   = "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a"
+            "USBip-$v-arm64.exe" = "cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800"
+          }
+          New-Item -ItemType Directory -Force build\usbip | Out-Null
+          foreach ($f in $files.Keys) {
+            Invoke-WebRequest -Uri "https://github.com/vadimgrn/usbip-win2/releases/download/v.$v/$f" -OutFile "build\usbip\$f"
+            $h = (Get-FileHash "build\usbip\$f" -Algorithm SHA256).Hash.ToLower()
+            if ($h -ne $files[$f]) { throw "Checksum mismatch for $f ($h)" }
+          }
       - name: Build installer
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\usbeam.iss'
       - uses: actions/upload-artifact@v4
@@ -77,20 +92,9 @@ jobs:
           name: USBeam-Linux-Arch-package
           path: packaging/linux/*.pkg.tar.zst
 
-  linux-appimage:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build AppImage
-        run: bash packaging/appimage/build.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: USBeam-Linux-AppImage
-          path: build/USBeam-*.AppImage
-
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows-installer, linux-appimage, linux-arch-package]
+    needs: [windows-installer, linux-arch-package]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -101,5 +105,5 @@ jobs:
         with:
           files: |
             dist/USBeam-Setup-*.exe
-            dist/USBeam-*.AppImage
             dist/*.pkg.tar.zst
+            dist/usbeam
