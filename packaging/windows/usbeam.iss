@@ -33,6 +33,8 @@ ArchitecturesAllowed=x64compatible arm64
 ArchitecturesInstallIn64BitMode=x64compatible arm64
 MinVersion=10.0.17763
 CloseApplications=force
+; Uninstall log in the temporary folder ("Uninstall Log ..."), for finding problems.
+UninstallLogging=yes
 
 [Files]
 Source: "..\..\build\usbeam-service-arm64.exe"; DestDir: "{app}"; DestName: "usbeam-service.exe"; Check: IsArm64; Flags: ignoreversion
@@ -152,24 +154,51 @@ begin
   Result := UsbipInstalledNow;
 end;
 
-// Uninstalling: remove usbip-win2 too, but only if USBeam installed it.
+// Uninstalling: remove usbip-win2 too, but only if USBeam installed it. Done at the start of the
+// uninstall (while everything is still in place), with its own log in the temporary folder, and
+// checked afterwards: if it's still installed, the person is told how to remove it.
+var
+  UsbipRemoved: Boolean;
+
+function UsbipUninstallString(var Unins: String): Boolean;
+begin
+  Result := RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1', 'UninstallString', Unins);
+  if Result then Unins := RemoveQuotes(Unins);
+  Result := Result and FileExists(Unins);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Flag: Cardinal;
-  Unins: String;
+  Unins, LogFile: String;
   Code: Integer;
 begin
-  if CurUninstallStep <> usPostUninstall then Exit;
-  if RegQueryDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', Flag) and (Flag = 1) then
+  if CurUninstallStep = usUninstall then
   begin
-    if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#UsbipAppId}_is1', 'UninstallString', Unins) then
+    if RegQueryDWordValue(HKLM64, 'SOFTWARE\USBeam', 'InstalledUsbip', Flag) and (Flag = 1) and UsbipUninstallString(Unins) then
     begin
-      Unins := RemoveQuotes(Unins);
-      if FileExists(Unins) then
-        Exec(Unins, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, Code);
+      LogFile := ExpandConstant('{%TEMP}\USBeam-usbip-uninstall.log');
+      Log('Removing usbip-win2: ' + Unins);
+      if Exec(Unins, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + LogFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+        Log('usbip-win2 uninstaller exit code ' + IntToStr(Code))
+      else
+        Log('usbip-win2 uninstaller could not be started: ' + SysErrorMessage(Code));
+      Sleep(1000);
+      if UsbipUninstallString(Unins) then
+        SuppressibleMsgBox('USBeam was removed, but the usbip-win2 driver it installed could not be removed automatically.' + #13#13 +
+          'Remove it in Windows Settings -> Apps -> Installed apps -> USBip -> Uninstall.', mbInformation, MB_OK, IDOK)
+      else
+        UsbipRemoved := True;
     end;
-  end;
-  RegDeleteKeyIncludingSubkeys(HKLM64, 'SOFTWARE\USBeam');
+  end
+  else if CurUninstallStep = usPostUninstall then
+    RegDeleteKeyIncludingSubkeys(HKLM64, 'SOFTWARE\USBeam');
+end;
+
+// Removing the driver finishes when Windows restarts.
+function UninstallNeedRestart(): Boolean;
+begin
+  Result := UsbipRemoved;
 end;
 
 // Stop the running service and app before replacing their files (upgrades).
