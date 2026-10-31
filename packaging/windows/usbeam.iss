@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.3.10"
+#define AppVersion "0.3.11"
 ; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled and always installed
 ; (when missing or older), visibly, before USBeam itself. github.com/vadimgrn/usbip-win2,
 ; BSD-2-Clause, see THIRD-PARTY.txt.
@@ -313,6 +313,17 @@ begin
     'if ($reboot) { W "a restart of Windows is needed" } else { W "no restart needed" }' + #13#10;
 end;
 
+// Automated tests and scripted removals: "/REMOVEDRIVER" on the uninstaller's command line (or
+// USBEAM_REMOVE_DRIVER=1 in its environment) removes the driver without asking.
+function RemoveDriverAsked(): Boolean;
+var
+  I: Integer;
+begin
+  Result := GetEnv('USBEAM_REMOVE_DRIVER') = '1';
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/REMOVEDRIVER') = 0 then Result := True;
+end;
+
 function UsbipPresent(): Boolean;
 begin
   Result := RegKeyExists(HKLM64, UsbipKey) or FileExists(UsbipExe()) or DirExists(ExpandConstant('{commonpf64}\USBip'));
@@ -433,6 +444,11 @@ begin
       ULog('The USBeam service was not running (sc exit ' + IntToStr(Code) + ').');
     if not UsbipPresent() then
       ULog('usbip-win2 is not installed.')
+    else if RemoveDriverAsked() then
+    begin
+      ULog('Remove the usbip-win2 driver too: Yes (asked when the uninstall was started).');
+      RemoveUsbip();
+    end
     else if MsgBox('Also remove the usbip-win2 driver?' + #13#10 + #13#10 +
                    'It lets this PC use devices from other PCs. Choose No if another program uses it.',
                    mbConfirmation, MB_YESNO) = IDYES then

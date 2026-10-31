@@ -21,6 +21,7 @@
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QLockFile>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMessageBox>
@@ -29,6 +30,7 @@
 #include <QNetworkRequest>
 #include <QPalette>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScreen>
@@ -36,6 +38,7 @@
 #include <QStyleHints>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -46,6 +49,7 @@
 #include <QWebEngineView>
 #include <unistd.h>
 #include <limits.h>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include "../../common/version.h"
@@ -57,6 +61,68 @@ static const char *INSTALLED_IMAGE = "/opt/usbeam/USBeam.AppImage";
 static const char *PROJECT = "https://github.com/EliSantana1/USBeam";
 static const char *DOWNLOADS = "https://github.com/EliSantana1/USBeam/releases/download/";
 static bool g_quitting;
+static bool g_test;                // USBEAM_TEST=1: automated tests may ask for an update or uninstall
+static QStringList g_ownEnv;       // settings this app added to its own environment (not passed on)
+
+// Start a program on its own. It gets none of this app's open files, a clean environment and the
+// home folder as its working folder. Why: inside an AppImage, two files the AppImage runtime opened
+// stay open in every program started from here, and the runtime (with its temporary mount) keeps
+// running until all of them end. Before this, an update left the old installer and the old app's
+// runtime running for as long as the new app ran, more of them after each update.
+static bool launchDetached(const QString &program, const QStringList &args) {
+    QProcess p;
+    p.setProgram(program);
+    p.setArguments(args);
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    for (const QString &k : g_ownEnv) env.remove(k);
+    if (!program.endsWith(".AppImage")) env.remove("USBEAM_TEST");   // test mode only reaches other copies of USBeam
+    const QString appdir = qEnvironmentVariable("APPDIR");
+    for (const char *k : { "APPDIR", "APPIMAGE", "ARGV0", "OWD" }) env.remove(k);
+    if (!appdir.isEmpty()) {
+        for (const QString &k : env.keys()) {         // paths into this AppImage: drop just those parts
+            const QString v = env.value(k);
+            if (!v.contains(appdir)) continue;
+            QStringList keep;
+            for (const QString &part : v.split(':')) if (!part.contains(appdir)) keep << part;
+            if (keep.join("").isEmpty()) env.remove(k); else env.insert(k, keep.join(':'));
+        }
+    }
+    p.setProcessEnvironment(env);
+    p.setWorkingDirectory(QDir::homePath());
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    p.setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors | QProcess::UnixProcessFlag::ResetSignalHandlers);
+#endif
+    return p.startDetached();
+}
+
+// Programs this app waits for (password prompt + setup): they don't get its open files either.
+static void closeFilesInChild(QProcess &p) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    p.setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors | QProcess::UnixProcessFlag::ResetSignalHandlers);
+#else
+    (void)p;
+#endif
+}
+
+// This user's private folder for USBeam's lock and socket (not the shared temporary folder,
+// where another account could block them).
+static QString runtimeDir() {
+    QString d = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (d.isEmpty()) d = QDir::tempPath();
+    return d;
+}
+// The lock held by the running copy of the app (one per user), and its socket.
+static QString instanceLockPath() { return runtimeDir() + QString("/usbeam-app-%1.lock").arg(getuid()); }
+static QString instanceSocketPath() { return runtimeDir() + QString("/usbeam-app-%1.sock").arg(getuid()); }
+
+// A message that also closes by itself after a while, so a forgotten one can't keep this
+// program running for days (it is often the installer, started by an update).
+static void showMessage(QMessageBox::Icon icon, const QString &text, int autoCloseMs = 300000) {
+    if (g_test) { fprintf(stderr, "usbeam-app: %s\n", qPrintable(text)); return; }
+    QMessageBox box(icon, "USBeam", text, QMessageBox::Ok);
+    QTimer::singleShot(autoCloseMs, &box, &QMessageBox::reject);
+    box.exec();
+}
 
 static QString readToken(bool *denied) {
     QFile f(TOKEN_FILE);
@@ -69,7 +135,7 @@ static QString readToken(bool *denied) {
 // Start the USBeam service if it isn't running (after Quit, Restart or a crash). USBeam's
 // polkit rule lets administrators start and stop this one service without a password.
 static void ensureService() {
-    QProcess::startDetached("systemctl", { "start", "--no-ask-password", "usbeam.service" });
+    launchDetached("systemctl", { "start", "--no-ask-password", "usbeam.service" });
 }
 
 static bool darkTheme() {
@@ -123,10 +189,15 @@ static QString runSetup(const QString &image) {
     QFile::setPermissions(tmp.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner | QFile::ReadGroup | QFile::ExeGroup | QFile::ReadOther | QFile::ExeOther);
 
     QProcess p;
+    closeFilesInChild(p);
     // Through /bin/sh: some systems don't allow running programs from the temporary folder.
     p.start("pkexec", { "/bin/sh", tmp.path() + "/setup.sh", "--install", tmp.path(), image });
     if (!p.waitForStarted(10000)) return "The password prompt (pkexec) could not be started.";
-    p.waitForFinished(300000);
+    if (!p.waitForFinished(300000)) {               // nobody answered the password prompt
+        p.terminate();
+        p.waitForFinished(5000);
+        return "The password prompt wasn't answered within 5 minutes. USBeam may not have been installed or updated; please try again.";
+    }
     if (p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0) return "";
     switch (p.exitCode()) {
     case 126: case 127: return "Installation was cancelled.";
@@ -143,8 +214,8 @@ static int appImageStart(bool forceInstall, const QStringList &args) {
     if (image.isEmpty() || QFileInfo(image).canonicalFilePath() == INSTALLED_IMAGE) return -1;
     const QString kind = installKind();
     if (kind == "package") {
-        QMessageBox::warning(nullptr, "USBeam", "USBeam is already installed as a package on this computer.\n\n"
-                                                "Open USBeam from your application menu, or remove the package before using this AppImage.");
+        showMessage(QMessageBox::Warning, "USBeam is already installed as a package on this computer.\n\n"
+                                          "Open USBeam from your application menu, or remove the package before using this AppImage.");
         return 1;
     }
     QString installed;
@@ -152,9 +223,13 @@ static int appImageStart(bool forceInstall, const QStringList &args) {
     if (f.open(QIODevice::ReadOnly)) installed = QString::fromLatin1(f.readAll()).trimmed();
     const bool update = kind == "appimage";
     if (update && !forceInstall && !newerVersion(USBEAM_VERSION, installed)) {
-        QProcess::startDetached(INSTALLED_IMAGE, args);              // already installed: use that copy
+        launchDetached(INSTALLED_IMAGE, args);                       // already installed: use that copy
         return 0;
     }
+    // One installer at a time (for example Update clicked twice): a second one just ends.
+    QLockFile setupLock(runtimeDir() + "/usbeam-setup.lock");
+    setupLock.setStaleLockTime(0);                                   // stale only if its program is gone
+    if (!setupLock.tryLock(0) && setupLock.error() == QLockFile::LockFailedError) return 0;
     if (!forceInstall) {
         QMessageBox box(QMessageBox::Question, "USBeam",
             update ? QString("Update USBeam from %1 to %2?").arg(installed, USBEAM_VERSION) : QString("Install USBeam %1?").arg(USBEAM_VERSION),
@@ -167,12 +242,25 @@ static int appImageStart(bool forceInstall, const QStringList &args) {
         QPushButton *ok = box.addButton(update ? "Update" : "Install", QMessageBox::AcceptRole);
         box.addButton(QMessageBox::Cancel);
         box.setWindowIcon(appIcon());
+        QTimer::singleShot(300000, &box, &QMessageBox::reject);    // forgotten: close (counts as Cancel)
         box.exec();
         if (box.clickedButton() != ok) return 0;
     }
+    // Updating: hold the app's own lock while installing, so USBeam opened from the menu meanwhile
+    // (the old version, about to be replaced) doesn't start and stay running instead of the new one.
+    // The old app lets go of it just before starting this installer.
+    QLockFile instanceLock(instanceLockPath());
+    instanceLock.setStaleLockTime(0);
+    if (update) instanceLock.tryLock(10000);
     QString err = runSetup(image);
-    if (!err.isEmpty()) { QMessageBox::warning(nullptr, "USBeam", err); return 1; }
-    QProcess::startDetached(INSTALLED_IMAGE, {});
+    instanceLock.unlock();
+    setupLock.unlock();
+    if (!err.isEmpty()) {
+        if (update) launchDetached(INSTALLED_IMAGE, {});             // the update didn't happen: USBeam carries on as before
+        showMessage(QMessageBox::Warning, err);
+        return 1;
+    }
+    launchDetached(INSTALLED_IMAGE, {});
     return 0;
 }
 
@@ -272,21 +360,24 @@ static void removeUserData() {
 }
 
 int main(int argc, char **argv) {
+    g_test = qEnvironmentVariable("USBEAM_TEST") == "1";
+    // Settings added here are for this app only: launchDetached() doesn't pass them on.
+    auto setOwn = [](const char *k, const char *v) { qputenv(k, v); g_ownEnv << k; };
     // Inside the AppImage, Chromium's own sandbox (used by the window's web view) often can't start
     // (it needs features some distributions restrict). The window only shows USBeam's own local page.
     if (!qEnvironmentVariableIsEmpty("APPIMAGE")) {
-        if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
+        if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) setOwn("QTWEBENGINE_DISABLE_SANDBOX", "1");
         // Draw the window without the graphics card: Qt inside the AppImage can't always use the
         // computer's own graphics drivers, and USBeam's simple page doesn't need them.
-        if (qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND")) qputenv("QT_QUICK_BACKEND", "software");
+        if (qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND")) setOwn("QT_QUICK_BACKEND", "software");
         // AppImageLauncher (installed on some systems): don't offer to "integrate" USBeam,
-        // it installs itself. Also applies to the copies of USBeam this one starts.
+        // it installs itself. Programs started from here get it too (other copies of USBeam).
         qputenv("APPIMAGELAUNCHER_DISABLE", "1");
     }
     // Wayland first; X11 only on desktops without Wayland.
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") &&
         (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland"))
-        qputenv("QT_QPA_PLATFORM", "wayland;xcb");
+        setOwn("QT_QPA_PLATFORM", "wayland;xcb");
     QApplication app(argc, argv);
     app.setApplicationName("USBeam");
     app.setApplicationDisplayName("USBeam");
@@ -296,28 +387,59 @@ int main(int argc, char **argv) {
     const bool forceInstall = app.arguments().contains("--install");
     QStringList fwd; if (trayOnly) fwd << "--tray";
 
-    int r = appImageStart(forceInstall, fwd);
-    if (r >= 0) return r;
-
-    // One copy per user: a second start just brings the running window forward.
-    QString sockName = QString("usbeam-app-%1").arg(getuid());
-    {
-        QLocalSocket probe;
-        probe.connectToServer(sockName);
-        if (probe.waitForConnected(500)) {
-            if (!trayOnly) { probe.write("show"); probe.flush(); probe.waitForBytesWritten(500); }
-            return 0;
-        }
+    // Automated tests only: ask the running copy to update from a local file, or to uninstall.
+    QByteArray testMsg;
+    if (g_test) {
+        const QStringList a = app.arguments();
+        int i = a.indexOf("--test-update");
+        if (i >= 0 && i + 1 < a.size()) testMsg = "test-update " + QFileInfo(a[i + 1]).absoluteFilePath().toUtf8();
+        if (a.contains("--test-uninstall")) testMsg = "test-uninstall";
     }
+
+    if (testMsg.isEmpty()) {
+        int r = appImageStart(forceInstall, fwd);
+        if (r >= 0) return r;
+    }
+
+    // One copy per user: the lock decides (no race when two start at once, for example at sign-in);
+    // a second start just brings the running window forward.
+    const QString sockName = instanceSocketPath();
+    QLockFile instanceLock(instanceLockPath());
+    instanceLock.setStaleLockTime(0);                 // stale only if its program is gone (crash)
+    if (!instanceLock.tryLock(0) && instanceLock.error() == QLockFile::LockFailedError) {
+        QByteArray msg = !testMsg.isEmpty() ? testMsg : trayOnly ? QByteArray() : QByteArray("show");
+        if (msg.isEmpty()) return 0;
+        for (int tries = 0; tries < 20; tries++) {    // it may still be starting: try for up to 10 s
+            QLocalSocket probe;
+            probe.connectToServer(sockName);
+            if (probe.waitForConnected(500)) { probe.write(msg); probe.flush(); probe.waitForBytesWritten(1000); return 0; }
+            QThread::msleep(500);
+        }
+        return testMsg.isEmpty() ? 0 : 2;
+    }
+    if (!testMsg.isEmpty()) return 2;                 // test request but USBeam isn't running
     QLocalServer::removeServer(sockName);
     QLocalServer server;
+    server.setSocketOptions(QLocalServer::UserAccessOption);
     server.listen(sockName);
+    // Before starting another copy of USBeam (update, restart): let it take over at once.
+    auto handOver = [&] { server.close(); instanceLock.unlock(); };
 
     ensureService();
     Window win;
+    std::function<void(const QString &)> startInstaller;   // set below
+    std::function<void()> uninstall;
     QObject::connect(&server, &QLocalServer::newConnection, [&] {
         QLocalSocket *c = server.nextPendingConnection();
-        QObject::connect(c, &QLocalSocket::readyRead, [&win, c] { c->readAll(); win.showUp(); c->deleteLater(); });
+        QObject::connect(c, &QLocalSocket::readyRead, [&, c] {
+            const QByteArray msg = c->readAll();
+            c->deleteLater();
+            const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/";
+            const QString file = QString::fromUtf8(msg.mid(12));
+            if (g_test && msg.startsWith("test-update ") && file.startsWith(cache) && !file.contains("..")) startInstaller(file);
+            else if (g_test && msg == "test-uninstall") uninstall();
+            else win.showUp();
+        });
     });
 
     QNetworkAccessManager net;
@@ -392,54 +514,83 @@ int main(int argc, char **argv) {
         d->accept();
     });
 
+    // Uninstall (gear menu): removes USBeam for everyone, through the password prompt.
+    bool uninstalling = false;
+    uninstall = [&] {
+        if (uninstalling) return;                  // already waiting for the password prompt
+        const QString kind = installKind();
+        if (kind != "appimage" && !(kind == "package" && QFile::exists("/usr/bin/pacman"))) {
+            win.report("Remove USBeam with your package manager.");
+            return;
+        }
+        win.report("Uninstalling…");
+        uninstalling = true;
+        g_quitting = true;                         // don't start the service again while it's being removed
+        auto *p = new QProcess(&app);
+        closeFilesInChild(*p);
+        QObject::connect(p, &QProcess::finished, &app, [&, p](int code, QProcess::ExitStatus st) {
+            p->deleteLater();
+            if (st == QProcess::NormalExit && code == 0) {
+                removeUserData();
+                tray.hide();
+                win.hide();
+                showMessage(QMessageBox::Information, "USBeam has been uninstalled.", 60000);
+                app.quit();
+            } else {
+                uninstalling = false;
+                g_quitting = false;
+                win.report(code == 126 || code == 127 ? "Uninstall was cancelled." : QString("Uninstall failed (%1).").arg(code));
+            }
+        });
+        if (kind == "appimage") p->start("pkexec", { "/bin/sh", QString(PREFIX) + "/setup.sh", "--uninstall" });
+        else p->start("pkexec", { "/usr/bin/pacman", "-Rns", "--noconfirm", "usbeam" });
+    };
+
+    // Update: start the downloaded USBeam to install itself, then close this copy (the new one
+    // starts when it's done).
+    bool updating = false;
+    startInstaller = [&](const QString &path) {
+        win.report("Installing… you'll be asked for your password.");
+        handOver();                                // the new copy may start before this one has closed
+        if (launchDetached(path, { "--install" })) { g_quitting = true; tray.hide(); app.quit(); return; }
+        updating = false;
+        instanceLock.tryLock(0);                   // it didn't start: carry on as before
+        QLocalServer::removeServer(sockName);
+        server.listen(sockName);
+        win.report("The update could not be started.");
+    };
+
     // Requests from the page.
     win.page->onAppLink = [&](const QUrl &url) {
         const QString what = url.path();
         const QUrlQuery q(url);
         if (what == "open") {
             QUrl target(q.queryItemValue("url", QUrl::FullyDecoded));
-            if (target.toString().startsWith(PROJECT)) QDesktopServices::openUrl(target);
+            if (target.toString().startsWith(PROJECT) && !launchDetached("xdg-open", { target.toString(QUrl::FullyEncoded) }))
+                QDesktopServices::openUrl(target);
             return;
         }
-        if (what == "uninstall") {
-            const QString kind = installKind();
-            win.report("Uninstalling…");
-            g_quitting = true;                         // don't start the service again while it's being removed
-            auto *p = new QProcess(&app);
-            QObject::connect(p, &QProcess::finished, &app, [&, p](int code, QProcess::ExitStatus st) {
-                p->deleteLater();
-                if (st == QProcess::NormalExit && code == 0) {
-                    g_quitting = true;
-                    removeUserData();
-                    tray.hide();
-                    QMessageBox::information(nullptr, "USBeam", "USBeam has been uninstalled.");
-                    app.quit();
-                } else {
-                    g_quitting = false;
-                    win.report(code == 126 || code == 127 ? "Uninstall was cancelled." : QString("Uninstall failed (%1).").arg(code));
-                }
-            });
-            if (kind == "appimage") p->start("pkexec", { "/bin/sh", QString(PREFIX) + "/setup.sh", "--uninstall" });
-            else if (kind == "package" && QFile::exists("/usr/bin/pacman")) p->start("pkexec", { "/usr/bin/pacman", "-Rns", "--noconfirm", "usbeam" });
-            else { g_quitting = false; win.report("Remove USBeam with your package manager."); }
-            return;
-        }
+        if (what == "uninstall") { uninstall(); return; }
         if (what == "update") {
             const QString src = q.queryItemValue("url", QUrl::FullyDecoded), sha = q.queryItemValue("sha256").toLower();
             const QString ver = q.queryItemValue("version");
             if (installKind() != "appimage" || !src.startsWith(DOWNLOADS) || src.contains("..") || !src.endsWith(".AppImage") ||
                 ver.isEmpty() || ver.contains(QRegularExpression("[^0-9.]"))) { win.report("This update can't be installed from here."); return; }
+            if (updating) { win.report("The update is already being downloaded…"); return; }
+            updating = true;
             QNetworkRequest req{QUrl(src)};
             req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+            req.setTransferTimeout(60000);         // no data for a minute (network gone, PC slept): give up
             QNetworkReply *rep = net.get(req);
             QObject::connect(rep, &QNetworkReply::downloadProgress, &win, [&win, ver](qint64 got, qint64 total) {
                 if (total > 0) win.report(QString("Downloading USBeam %1… %2%").arg(ver).arg(got * 100 / total));
             });
             QObject::connect(rep, &QNetworkReply::finished, &app, [&, rep, sha, ver] {
                 rep->deleteLater();
-                if (rep->error() != QNetworkReply::NoError) { win.report("The download failed. Is this PC online?"); return; }
+                if (rep->error() != QNetworkReply::NoError) { updating = false; win.report("The download failed. Is this PC online?"); return; }
                 QByteArray data = rep->readAll();
                 if (!sha.isEmpty() && QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex() != sha.toLatin1()) {
+                    updating = false;
                     win.report("The download was damaged (its fingerprint doesn't match). Nothing was changed.");
                     return;
                 }
@@ -448,12 +599,10 @@ int main(int argc, char **argv) {
                 QDir().mkpath(cache);
                 QString path = cache + QString("/USBeam-%1.AppImage").arg(ver);
                 QFile f(path);
-                if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) { win.report("The update could not be saved."); return; }
+                if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) { updating = false; win.report("The update could not be saved."); return; }
                 f.close();
                 f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner | QFile::ReadGroup | QFile::ExeGroup | QFile::ReadOther | QFile::ExeOther);
-                win.report("Installing… you'll be asked for your password.");
-                if (QProcess::startDetached(path, { "--install" })) { g_quitting = true; tray.hide(); app.quit(); }
-                else win.report("The update could not be started.");
+                startInstaller(path);
             });
             return;
         }
@@ -476,8 +625,8 @@ int main(int argc, char **argv) {
         upd->stop();
         QStringList args;
         if (!win.isVisible()) args << "--tray";
-        server.close();                                // let the new copy take over
-        QProcess::startDetached(QString::fromLocal8Bit(exe), args);
+        handOver();                                    // let the new copy take over
+        launchDetached(QString::fromLocal8Bit(exe), args);
         app.quit();
     });
     upd->start(5000);

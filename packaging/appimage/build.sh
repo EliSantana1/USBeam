@@ -105,7 +105,7 @@ for f in libsoftokn3.so libfreeblpriv3.so libnssckbi.so; do
     [ -f "$NSSDIR/$f" ] || { echo "ERROR: missing security module $f"; exit 1; }
 done
 ./linuxdeploy --appdir "$APPDIR" --deploy-deps-only "$NSSDIR/libsoftokn3.so" --deploy-deps-only "$NSSDIR/libfreeblpriv3.so" --deploy-deps-only "$NSSDIR/libnssckbi.so"
-ls -la "$NSSDIR" | grep -E "nss|softokn|freebl"
+find "$NSSDIR" -maxdepth 1 \( -name '*nss*' -o -name '*softokn*' -o -name '*freebl*' \) -exec ls -la {} +
 
 # The AppImage's own icon: real files (not links), which newer appimagetool versions require.
 rm -f "$APPDIR/usbeam.png" "$APPDIR/.DirIcon"

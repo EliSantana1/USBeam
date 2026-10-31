@@ -535,8 +535,8 @@ static int cmd_cleanup(void) {
     char none[1][40];
     ufw_sync(none, 0);
     firewalld_sync(none, 0);
-    system("rm -rf /var/lib/usbeam /run/usbeam");
-    printf("USBeam's firewall rules and data were removed.\n");
+    if (system("rm -rf /var/lib/usbeam /run/usbeam") == 0) printf("USBeam's firewall rules and data were removed.\n");
+    else printf("USBeam's firewall rules were removed; some of its data could not be removed.\n");
     return 0;
 }
 
