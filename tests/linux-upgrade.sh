@@ -11,7 +11,12 @@ set -u
 OLD=$(readlink -f "$1"); NEW=$(readlink -f "$2")
 NEWVER=$(sed -n 's/.*USBEAM_VERSION "\(.*\)".*/\1/p' "$(dirname "$0")/../src/common/version.h")
 LOG=$(mktemp -d); FAIL=0
-export USBEAM_TEST=1 QT_QPA_PLATFORM=offscreen QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu"
+export USBEAM_TEST=1 QT_QPA_PLATFORM=xcb QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu"
+# No screen here: a virtual X11 screen (the AppImage brings Qt's Wayland and X11 parts only).
+unset WAYLAND_DISPLAY
+Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+export DISPLAY=:99
+sleep 2
 
 say()  { echo; echo "== $*"; }
 fail() { echo "FAIL: $*"; FAIL=1; }
@@ -67,7 +72,7 @@ for fd in /proc/"$old_app"/fd/*; do
 done
 echo "Passing on $((n - 10)) of the old app's open files"
 setsid bash -c "$inherit exec \"\$0\" --install" "$HOME/.cache/USBeam/USBeam-$NEWVER.AppImage" </dev/null >>"$LOG/app.log" 2>&1 &
-sleep 2; kill "$old_app"
+sleep 2; [ -n "$old_app" ] && kill "$old_app"
 wait_for "$NEWVER didn't install" 180 installed "$NEWVER"
 wait_for "the app didn't start after the update" 60 one_app
 check_clean

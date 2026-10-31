@@ -149,7 +149,7 @@ jobs:
           echo "Previous release: $prev"
           gh release download "$prev" -R "$GITHUB_REPOSITORY" --pattern '*.AppImage' --dir old
       - name: What AppImages need
-        run: sudo apt-get update -q && sudo apt-get install -y -q fuse3 libegl1 libgl1 libopengl0 libfontconfig1 libxkbcommon0 libdbus-1-3
+        run: sudo apt-get update -q && sudo apt-get install -y -q fuse3 xvfb libegl1 libgl1 libopengl0 libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libnss3
       - name: Upgrade test
         run: bash tests/linux-upgrade.sh old/*.AppImage new/*.AppImage
 
