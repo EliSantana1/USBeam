@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.." || exit 1
 if [ "${1:-}" != "--inside" ]; then
     mkdir -p build
     gcc -O2 -Wall -Werror -o build/netdrop tests/netdrop.c || exit 1
-    exec unshare --net "$0" --inside
+    exec unshare --net bash "$0" --inside
 fi
 LIMIT=35
 # Bring up the namespace's own loopback network.
