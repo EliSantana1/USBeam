@@ -20,6 +20,19 @@ as if it were plugged in there.
 - **Open standard.** Uses USB/IP, so it also works with Linux's built-in USB/IP
   support and with [usbip-win2](https://github.com/vadimgrn/usbip-win2).
 
+## Safeguards
+
+- **Your system drive is off-limits.** A USB drive your running system lives on is never shown,
+  shared or touched.
+- **Drives aren't shared unless you choose to share them.** The same goes for Bluetooth/wireless
+  adapters and RGB lighting controllers. A drive with files open is never taken away.
+- **Network adapters are never shared**, so USBeam can't cut off your own connection.
+- **Devices come back.** A shared device returns to its own PC when it's released, unplugged or
+  the other PC disconnects. If the network drops, it's freed within about 20 seconds.
+- **Hardware scan only touches empty USB ports**, never ones with a device on them.
+- **Open source (GPL-3.0)**, and every release is built and tested automatically on GitHub.
+- **Use it only on networks you trust**: device traffic isn't encrypted.
+
 ## Download
 
 See [Releases](../../releases):
