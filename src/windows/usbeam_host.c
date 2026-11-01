@@ -164,6 +164,8 @@ typedef struct Dev {
     int is_net, is_storage;  // network adapter / opt-in device: drive or radio (set by refresh)
     int is_radio;            // Bluetooth / wireless adapter (opt-in like drives)
     int is_light;            // lighting (RGB/LED) controller (opt-in like drives)
+    int is_system;           // holds the running Windows: never listed, shared or touched (stays set)
+    ULONGLONG sys_checked;   // when is_system was last worked out (GetTickCount64), 0 = not yet
     ULONGLONG drive_busy_until; // a drive refused to go because files are open on this PC (shown for a while)
     int hidden, share_forced;// user's choice: "Don't share" / "Share" (drives)
     int blocked;             // temporarily kept on this PC (refuse clients)
@@ -283,6 +285,7 @@ static BOOL via_usbip(const wchar_t *inst) {
 }
 
 // Rescan USB devices. Only top-level, removable, non-hub devices are listed.
+static int dev_is_system(Dev *d);   // (below, with the drive helpers)
 static void refresh_devices(void) {
     EnterCriticalSection(&g_devs_cs);
     for (int i = 0; i < MAX_DEVS; i++) { if (g_devs[i].present == 0) g_devs[i].have_desc = 0; g_devs[i].was_present = g_devs[i].present; g_devs[i].present = 0; }
@@ -313,12 +316,22 @@ static void refresh_devices(void) {
         if (!SetupDiGetDevicePropertyW(set, &dev, &DEVPKEY_Device_BusReportedDeviceDesc, &t, (BYTE *)d->name, sizeof d->name, NULL, 0) || !d->name[0])
             get_prop(set, &dev, SPDRP_DEVICEDESC, d->name, sizeof d->name);
         classify_device(d, svc);
-        if (!d->in_use && !d->busy && !d->on_winusb) {      // lighting controller? (decided before any driver switch)
+        // A drive the running Windows lives on: decided first, before anything else looks at it.
+        // Checked when it appears and then every 10 s (each check opens its disks briefly).
+        if (!d->was_present) d->sys_checked = 0;
+        if (!d->is_system && !d->in_use && (!d->sys_checked || GetTickCount64() - d->sys_checked > 10000)) {
+            d->sys_checked = GetTickCount64();
+            if (dev_is_system(d)) {
+                d->is_system = 1;
+                logm("[%s] %ls holds the running Windows: never listed or touched by USBeam", d->busid, d->name);
+            }
+        }
+        if (!d->is_system && !d->in_use && !d->busy && !d->on_winusb) {      // lighting controller? (decided before any driver switch)
             char nm[512]; WideCharToMultiByte(CP_UTF8, 0, d->name, -1, nm, sizeof nm, NULL, NULL);
             if (!d->have_desc && d->removable && devp_is_lighting(nm, d->vid, d->pid, NULL, 0, 0)) hub_descriptors(d);
             d->is_light = devp_is_lighting(nm, d->vid, d->pid, (const unsigned char (*)[3])d->iface_class, d->num_ifaces, d->have_desc);
         }
-        d->wanted = !d->is_net && !d->hidden && (!(d->is_storage || d->is_light) || d->share_forced);
+        d->wanted = !d->is_system && !d->is_net && !d->hidden && (!(d->is_storage || d->is_light) || d->share_forced);
         if (d->wanted && d->removable && !d->have_desc && !d->in_use && !d->busy) hub_descriptors(d);
     }
     if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
@@ -467,6 +480,65 @@ static int drive_in_use(Dev *d) {
         Sleep(400);
     }
     return 1;
+}
+
+// ================================================================ system drives: never shown, never touched
+// A USB drive that the running Windows lives on (the Windows folder, the boot partition or a page
+// file) must never be shared, reset or even listed: taking it away would crash this PC. Compared
+// by disk number, so drive letters don't matter. Once found, a device stays marked (is_system).
+static void add_volume_disks(const wchar_t *vol, DWORD *disks, int *n, int max) {
+    HANDLE h = CreateFileW(vol, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    union { VOLUME_DISK_EXTENTS v; BYTE b[1024]; } ex;
+    DWORD got;
+    if (DeviceIoControl(h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, &ex, sizeof ex, &got, NULL))
+        for (DWORD k = 0; k < ex.v.NumberOfDiskExtents && *n < max; k++) {
+            int dup = 0;
+            for (int i = 0; i < *n; i++) if (disks[i] == ex.v.Extents[k].DiskNumber) dup = 1;
+            if (!dup) disks[(*n)++] = ex.v.Extents[k].DiskNumber;
+        }
+    CloseHandle(h);
+}
+static void add_letter_disks(wchar_t letter, DWORD *disks, int *n, int max) {
+    if (!iswalpha(letter)) return;
+    wchar_t vol[8] = L"\\\\.\\X:"; vol[4] = letter;
+    add_volume_disks(vol, disks, n, max);
+}
+static int system_disks(DWORD *disks, int max) {
+    int n = 0;
+    wchar_t win[MAX_PATH];
+    if (GetWindowsDirectoryW(win, MAX_PATH)) add_letter_disks(win[0], disks, &n, max);
+    // Page files ("\\??\\C:\\pagefile.sys" or "C:\\pagefile.sys ...").
+    wchar_t pf[2048]; DWORD cb = sizeof pf;
+    const wchar_t *mm = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
+    for (int v = 0; v < 2; v++) {
+        cb = sizeof pf; pf[0] = 0;
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, mm, v ? L"PagingFiles" : L"ExistingPageFiles", RRF_RT_REG_MULTI_SZ, NULL, pf, &cb) != ERROR_SUCCESS) continue;
+        for (wchar_t *e = pf; *e; e += wcslen(e) + 1) {
+            const wchar_t *x = e;
+            if (!wcsncmp(x, L"\\??\\", 4)) x += 4;
+            if (x[0] && x[1] == L':') add_letter_disks(x[0], disks, &n, max);
+        }
+    }
+    // The boot (EFI system) partition, e.g. "\\Device\\HarddiskVolume1".
+    wchar_t sp[MAX_PATH]; cb = sizeof sp;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Setup", L"SystemPartition", RRF_RT_REG_SZ, NULL, sp, &cb) == ERROR_SUCCESS && sp[0] == L'\\') {
+        wchar_t path[MAX_PATH + 32];
+        _snwprintf(path, MAX_PATH + 32, L"\\\\?\\GLOBALROOT%ls", sp);
+        path[MAX_PATH + 31] = 0;
+        add_volume_disks(path, disks, &n, max);
+    }
+    return n;
+}
+// 1 if any disk behind this USB device is one the running Windows lives on.
+static int dev_is_system(Dev *d) {
+    static DWORD sys[32]; static int nsys; static ULONGLONG at;
+    ULONGLONG now = GetTickCount64();
+    if (!at || now - at > 5000) { nsys = system_disks(sys, 32); at = now; }
+    DWORD mine[8];
+    int nm = drive_disks(d, mine, 8);
+    for (int i = 0; i < nm; i++) for (int k = 0; k < nsys; k++) if (mine[i] == sys[k]) return 1;
+    return 0;
 }
 
 // ================================================================ share / unshare
@@ -625,6 +697,7 @@ static void rescan_hardware(void) {
 static BOOL share_device(Dev *d) {
     HDEVINFO set; SP_DEVINFO_DATA dev;
     wchar_t oldClass[64] = L"";
+    if (d->is_system) { logm("[%s] refused: holds the running Windows", d->busid); return FALSE; }
     if (!open_inst(d->inst, &set, &dev, NULL)) { say("  Could not open device (%lu).", GetLastError()); return FALSE; }
     get_prop(set, &dev, SPDRP_CLASSGUID, oldClass, sizeof oldClass);
     logm("[%s] share: old class %ls service %ls", d->busid, oldClass, d->service);
@@ -676,6 +749,7 @@ static BOOL share_device(Dev *d) {
 // Put the device back on its normal Windows driver.
 static BOOL revert_driver(Dev *d) {
     HDEVINFO set; SP_DEVINFO_DATA dev;
+    if (d->is_system) return TRUE;              // never touched: it was never switched to WinUSB
     if (!open_inst(d->inst, &set, &dev, NULL)) { say("  Could not open device (%lu).", GetLastError()); return FALSE; }
     BOOL reboot = FALSE;
     BOOL ok = pDiUninstallDevice(NULL, set, &dev, 0, &reboot);

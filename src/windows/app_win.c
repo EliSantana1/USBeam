@@ -237,7 +237,7 @@ static DWORD WINAPI monitor_main(LPVOID arg) {
         ULONGLONG now = GetTickCount64();
         for (int i = 0; i < MAX_DEVS; i++) {
             Dev *d = &g_devs[i];
-            if (!d->used || d->in_use || d->busy) continue;
+            if (!d->used || d->in_use || d->busy || d->is_system) continue;
             if (d->present && d->on_winusb) {
                 InterlockedExchange(&d->busy, 1);
                 if (d->returning) say("[%s] %ls was plugged back in. Returning it to this PC...", d->busid, d->name);
@@ -655,7 +655,7 @@ static void firewall_sync(void) {
 
 // ---------------------------------------------------------------- app window API
 static Dev *dev_by_busid(const char *busid) {
-    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && !strcmp(g_devs[i].busid, busid)) return &g_devs[i];
+    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && !g_devs[i].is_system && !strcmp(g_devs[i].busid, busid)) return &g_devs[i];
     return NULL;
 }
 
@@ -665,7 +665,7 @@ static void add_local_json(sb_t *j) {
     int first = 1;
     for (int i = 0; i < MAX_DEVS; i++) {
         Dev *d = &g_devs[i];
-        if (!d->used || !d->present || !d->removable) continue;
+        if (!d->used || !d->present || !d->removable || d->is_system) continue;
         int cd; const char *st = local_state(d, &cd);
         int sys = !d->in_use && !d->share_forced && (d->is_radio || d->is_light);
         const char *note = d->is_net ? "network adapter, never shared" :
@@ -748,6 +748,26 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); SetEvent(g_quit_event); }
     else if (!strcmp(op, "restart")) { logm("Restart requested from the USBeam app"); InterlockedExchange(&g_restart, 1); SetEvent(g_quit_event); }
     else if (!strcmp(op, "diagnostics")) { diagnostics(out); return 200; }
+    else if (!strcmp(op, "scan_hw")) {        // "Scan for hardware changes" (gear menu)
+        int before = 0, after = 0;
+        refresh_devices();
+        EnterCriticalSection(&g_devs_cs);
+        for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].present) before++;
+        LeaveCriticalSection(&g_devs_cs);
+        rescan_hardware();
+        for (int w = 0; w < 6; w++) {
+            Sleep(500);
+            refresh_devices();
+            after = 0;
+            EnterCriticalSection(&g_devs_cs);
+            for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].present) after++;
+            LeaveCriticalSection(&g_devs_cs);
+        }
+        int found = after > before ? after - before : 0;
+        logm("Scan for hardware changes: %d new device(s)", found);
+        sb_printf(out, "{\"ok\":true,\"found\":%d}", found);
+        return 200;
+    }
     else if (!strcmp(op, "reset")) {
         EnterCriticalSection(&g_devs_cs);
         for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used) { g_devs[i].hidden = 0; g_devs[i].share_forced = 0; g_devs[i].blocked = 0; g_devs[i].hold_until = 0; }

@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include "../common/devpolicy.h"
+#include "sysdrive.h"
 
 #define USBDEV "/sys/bus/usb/devices"
 #define STUB "/sys/bus/usb/drivers/usbip-host"
@@ -89,11 +90,53 @@ static int on_vhci(const char *busid) {
     return realpath(p, real) && strstr(real, "vhci_hcd") != NULL;
 }
 
+// ---------------------------------------------------------------- system drives: never shown, never touched
+// A USB drive the running system lives on (see sysdrive.h) is left completely alone: not listed,
+// not shared, never unbound, reset or re-probed, whatever is asked. Once found it stays protected
+// until the PC restarts, even if something on it is unmounted for a moment (recorded in /run,
+// which starts empty after every restart).
+#define SYSDRV_FILE "/run/usbeam/system-drives"
+static char g_sysdrv[64][48];                 // "busid devnum": the same physical connection
+static int g_nsysdrv, g_sysdrv_loaded;
+static struct { char busid[32]; time_t at; } g_sysdrv_no[64];   // recently checked, not system
+static int is_system_drive(const char *busid) {
+    if (!busid || !busid[0] || !strncmp(busid, "usb", 3) || strchr(busid, ':')) return 0;
+    char key[48], dn[16] = "";
+    read_attr(busid, "devnum", dn, sizeof dn);
+    snprintf(key, sizeof key, "%s %s", busid, dn);
+    if (!g_sysdrv_loaded) {
+        g_sysdrv_loaded = 1;
+        FILE *f = fopen(SYSDRV_FILE, "r");
+        char l[64];
+        while (f && fgets(l, sizeof l, f) && g_nsysdrv < 64) { l[strcspn(l, "\r\n")] = 0; if (l[0]) snprintf(g_sysdrv[g_nsysdrv++], 48, "%s", l); }
+        if (f) fclose(f);
+    }
+    for (int i = 0; i < g_nsysdrv; i++) if (!strcmp(g_sysdrv[i], key)) return 1;
+    // Not system a moment ago: check again only every 10 s (each check opens its disks briefly).
+    time_t now = time(NULL); int slot = -1;
+    for (int i = 0; i < 64; i++) {
+        if (!strcmp(g_sysdrv_no[i].busid, busid)) { if (now - g_sysdrv_no[i].at < 10) return 0; slot = i; break; }
+        if (slot < 0 && (!g_sysdrv_no[i].busid[0] || now - g_sysdrv_no[i].at > 60)) slot = i;
+    }
+    if (sysdrv_usb_is_system(busid)) {
+        if (slot >= 0 && !strcmp(g_sysdrv_no[slot].busid, busid)) g_sysdrv_no[slot].busid[0] = 0;
+        if (g_nsysdrv < 64) snprintf(g_sysdrv[g_nsysdrv++], 48, "%s", key);
+        mkdir("/run/usbeam", 0755);
+        FILE *f = fopen(SYSDRV_FILE, "a");
+        if (f) { fprintf(f, "%s\n", key); fclose(f); }
+        logm("[%s] holds the running system: never listed or touched by USBeam", busid);
+        return 1;
+    }
+    if (slot >= 0) { snprintf(g_sysdrv_no[slot].busid, 32, "%s", busid); g_sysdrv_no[slot].at = now; }
+    return 0;
+}
+
 // Shareable = a real device (not a root hub or interface), not a hub, not a network adapter,
-// and not a device that is itself borrowed from another PC.
+// not a drive the running system lives on, and not a device that is itself borrowed from another PC.
 static int shareable(const char *busid) {
     if (!strncmp(busid, "usb", 3) || strchr(busid, ':') || !strchr(busid, '-')) return 0;
     if (!dev_present(busid)) return 0;
+    if (is_system_drive(busid)) return 0;
     if (on_vhci(busid)) return 0;
     if (attr_hex(busid, "bDeviceClass") == 0x09) return 0;
     if (has_net_child(busid)) return 0;
@@ -161,6 +204,7 @@ static const char *dev_name(const char *busid, char *buf, size_t n) {
 // ---------------------------------------------------------------- bind / return
 static int stub_bind(const char *busid) {
     char p[PATH_MAX], v[64];
+    if (is_system_drive(busid)) { logm("[%s] refused: holds the running system", busid); return -1; }
     snprintf(v, sizeof v, "add %s", busid);
     if (write_sysfs(STUB "/match_busid", v) < 0) { logm("[%s] match_busid add failed: %s", busid, strerror(errno)); return -1; }
     snprintf(p, sizeof p, USBDEV "/%s/driver/unbind", busid);
@@ -176,10 +220,79 @@ static int stub_bind(const char *busid) {
 
 static void return_to_host(const char *busid) {
     char v[64];
+    if (is_system_drive(busid)) return;           // never re-probed: it is in use by this PC right now
     if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
     snprintf(v, sizeof v, "del %s", busid);
     write_sysfs(STUB "/match_busid", v);           // so a replug binds to the normal driver
     if (dev_present(busid)) write_sysfs("/sys/bus/usb/drivers_probe", busid);
+}
+
+// ---------------------------------------------------------------- scan for hardware changes
+// One click finds USB devices Linux doesn't see: every USB port with no working device on it (nor
+// on its USB2/USB3 twin) is switched off and on, as if replugged. A drive that "Safely remove"
+// powered off comes back this way. Ports with a device on them are never touched, so nothing in
+// use is disturbed, and system drives (always on a port with a device) can't be affected.
+// Returns how many devices were found that weren't there before.
+static int usb_device_list(char ids[][32], int max) {
+    DIR *d = opendir(USBDEV);
+    if (!d) return 0;
+    int n = 0; struct dirent *e;
+    while ((e = readdir(d)) && n < max)
+        if (e->d_name[0] != '.' && strncmp(e->d_name, "usb", 3) && !strchr(e->d_name, ':')) snprintf(ids[n++], 32, "%s", e->d_name);
+    closedir(d);
+    return n;
+}
+static int scan_hardware(void) {
+    static char before[256][32], after[256][32];
+    int nb = usb_device_list(before, 256), reset = 0;
+    glob_t g;
+    if (glob(USBDEV "/*/*:1.0/*-port*", 0, NULL, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            const char *port = g.gl_pathv[i];
+            char p[PATH_MAX], peer[PATH_MAX], real[PATH_MAX], hub[64] = "", v[16] = "";
+            struct stat st;
+            if (!realpath(port, real) || strstr(real, "vhci_hcd")) continue;         // virtual ports for remote devices
+            // The hub this port belongs to ("usb2", "1-1"...): a hub with a system drive behind
+            // it is left alone entirely (root hubs only switch the one port, so they're fine).
+            const char *hb = port + strlen(USBDEV "/");                           // "<hub>/<hub>:1.0/<port>"
+            snprintf(hub, sizeof hub, "%.*s", (int)strcspn(hb, "/"), hb);
+            if (strncmp(hub, "usb", 3) && is_system_drive(hub)) continue;
+            snprintf(p, sizeof p, "%s/disable", port);
+            FILE *df = fopen(p, "r");
+            if (!df) continue;
+            if (!fgets(v, sizeof v, df)) v[0] = 0;
+            fclose(df);
+            if (atoi(v) != 0 || access(p, W_OK) != 0) continue;                   // switched off on purpose: leave it
+            snprintf(p, sizeof p, "%s/peer", port);
+            int busy = 0;
+            if (realpath(p, peer)) { snprintf(p, sizeof p, "%s/device", peer); if (lstat(p, &st) == 0) busy = 1; }
+            snprintf(p, sizeof p, "%s/device", port);
+            if (busy || lstat(p, &st) == 0) continue;                             // a device is on it (or its twin)
+            snprintf(p, sizeof p, "%s/state", port);                              // being plugged in right now?
+            df = fopen(p, "r"); v[0] = 0;
+            if (df) { if (!fgets(v, sizeof v, df)) v[0] = 0; fclose(df); }
+            if (strstr(v, "attached") && !strstr(v, "not")) continue;
+            snprintf(p, sizeof p, "%s/device", port);                             // last look, right before switching
+            if (lstat(p, &st) == 0) continue;
+            snprintf(p, sizeof p, "%s/disable", port);
+            if (write_sysfs(p, "1") == 0) { usleep(100000); write_sysfs(p, "0"); reset++; }
+        }
+        globfree(&g);
+    }
+    logm("Scan for hardware changes: %d empty USB ports checked", reset);
+    int found = 0;
+    for (int wait = 0; wait < (reset ? 8 : 0); wait++) {                    // devices take a moment to appear
+        usleep(500000);
+        int na = usb_device_list(after, 256);
+        found = 0;
+        for (int i = 0; i < na; i++) {
+            int old = 0;
+            for (int k = 0; k < nb && !old; k++) if (!strcmp(after[i], before[k])) old = 1;
+            if (!old) found++;
+        }
+    }
+    if (found) logm("Scan for hardware changes: found %d new USB device(s)", found);
+    return found;
 }
 
 // ---------------------------------------------------------------- requests
@@ -285,6 +398,7 @@ static const char *system_reason(const char *busid) {
 
 static int offerable(const char *busid) {
     HostDev *h = hdev(busid, 0);
+    if (is_system_drive(busid)) return 0;
     if (!shareable(busid)) return 0;
     if (is_hidden(busid) || drive_mounted(busid)) return 0;
     if (system_reason(busid) && !is_shared(busid)) return 0;

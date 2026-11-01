@@ -27,69 +27,70 @@
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body { font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system, Roboto, "Noto Sans", sans-serif; -webkit-font-smoothing: antialiased; }
 button, select, input { font: inherit; color: inherit; }
-.wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+.wrap { margin: 0 auto; padding: 0 12px; }
 
 header { background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
-header .wrap { display: flex; align-items: center; gap: 14px; padding-top: 12px; padding-bottom: 12px; flex-wrap: wrap; }
-.brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
-.pcchip { font-size: 12px; color: var(--muted); background: var(--chip); padding: 3px 9px; border-radius: 99px; }
+header .wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 7px; padding-bottom: 7px; }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+.brand svg { width: 22px; height: 22px; }
+.pcchip { font-size: 12px; color: var(--muted); background: var(--chip); padding: 2px 8px; border-radius: 99px; }
 .spacer { flex: 1 1 auto; }
 .netpick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
-select { padding: 7px 30px 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); min-height: 36px; font-size: 13px; cursor: pointer; }
+select { padding: 5px 28px 5px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); min-height: 30px; font-size: 12.5px; cursor: pointer; }
 /* Drop-down lists are drawn by the page itself (the browser's own pop-up lists misbehave in some
    Linux desktops, e.g. with 120% display scaling). The real <select> stays hidden underneath. */
 select.native { display: none; }
 .csel { position: relative; display: inline-block; }
-.cselbtn { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 36px; min-width: 120px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--text); text-align: left; }
+.cselbtn { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; min-width: 100px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--text); text-align: left; }
 .cselbtn svg { flex: none; opacity: .7; }
 .cselbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .csellist { position: fixed; z-index: 60; min-width: 120px; max-height: 260px; overflow: auto; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.25); }
 .csellist button { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 8px 10px; font-size: 13px; cursor: pointer; color: var(--text); white-space: nowrap; }
 .csellist button:hover, .csellist button:focus { background: var(--chip); outline: none; }
 .csellist button[aria-selected="true"] { font-weight: 600; color: var(--accent); }
-.iconbtn { min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--muted); }
+.iconbtn { min-height: 30px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; cursor: pointer; color: var(--muted); }
 .iconbtn:hover { color: var(--text); }
 
-main .wrap { padding-top: 22px; padding-bottom: 48px; }
-nav.tabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--chip); border-radius: 10px; margin-bottom: 18px; }
-nav.tabs button { min-height: 36px; padding: 0 16px; border: 0; border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer; background: transparent; color: var(--muted); }
+main .wrap { padding-top: 10px; padding-bottom: 12px; }
+nav.tabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--chip); border-radius: 8px; margin-left: 4px; white-space: nowrap; }
+nav.tabs button { min-height: 26px; padding: 0 10px; border: 0; border-radius: 6px; font-size: 12.5px; font-weight: 600; cursor: pointer; background: transparent; color: var(--muted); }
 nav.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
-.hint { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+.hint { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
 
-.box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 16px; overflow: hidden; box-shadow: var(--shadow); }
-.boxhead { display: flex; align-items: center; gap: 12px; padding: 14px 18px; flex-wrap: wrap; }
-.boxhead .name { font-weight: 600; font-size: 15px; }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; overflow: hidden; box-shadow: var(--shadow); }
+.boxhead { display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
+.boxhead .name { font-weight: 600; font-size: 14px; }
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .status::before { content: ""; width: 7px; height: 7px; border-radius: 99px; background: currentColor; }
 .status.on { color: var(--ok); } .status.off { color: var(--muted); }
 .via { font-size: 12px; color: var(--muted); }
-.row { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-top: 1px solid var(--line2); flex-wrap: wrap; }
-.dicon { width: 36px; height: 36px; border-radius: 9px; background: var(--chip); display: flex; align-items: center; justify-content: center; flex: 0 0 auto; color: var(--muted); }
-.dinfo { flex: 1 1 240px; min-width: 0; }
+.row { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--line2); }
+.dicon { width: 28px; height: 28px; border-radius: 7px; background: var(--chip); display: flex; align-items: center; justify-content: center; flex: 0 0 auto; color: var(--muted); }
+.dinfo { flex: 1 1 auto; min-width: 0; line-height: 1.25; }
 .dname { font-weight: 500; overflow-wrap: anywhere; }
-.dsub { font-size: 12px; color: var(--muted); }
+.dsub { font-size: 11px; color: var(--muted); }
 .derr { font-size: 12px; color: var(--bad); margin-top: 2px; }
-.pill { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; background: var(--chip); white-space: nowrap; color: var(--muted); }
+.pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--chip); white-space: nowrap; color: var(--muted); max-width: 130px; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.accent { color: var(--accent); } .pill.bad { color: var(--bad); }
-.auto { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); cursor: pointer; min-height: 36px; user-select: none; }
-.auto input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.auto { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); cursor: pointer; min-height: 28px; user-select: none; white-space: nowrap; flex: none; }
+.auto input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .auto.off { opacity: .5; cursor: not-allowed; } .auto.off input { cursor: not-allowed; }
-.btn { min-width: 92px; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-weight: 600; font-size: 13px; cursor: pointer; }
+.btn { min-width: 66px; min-height: 30px; padding: 0 10px; border-radius: 7px; flex: none; border: 1px solid var(--line); background: var(--panel); font-weight: 600; font-size: 13px; cursor: pointer; }
 .btn:hover { border-color: var(--muted); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: .55; cursor: default; }
-.noact { min-width: 92px; text-align: center; font-size: 12px; color: var(--muted); }
-.empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 12px; padding: 28px; text-align: center; color: var(--muted); }
-.note { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; color: var(--muted); }
-.netnote { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; }
+.noact { min-width: 66px; text-align: center; font-size: 12px; color: var(--muted); flex: none; }
+.empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 10px; padding: 16px; text-align: center; color: var(--muted); }
+.note { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 10px; color: var(--muted); }
+.netnote { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 10px; padding: 8px 12px; margin-bottom: 10px; }
 .netnote .txt { flex: 1 1 320px; min-width: 0; }
 .netnote .txt b { font-weight: 600; }
 .netnote .txt div { font-size: 12px; color: var(--muted); }
 .netnote .acts { display: flex; gap: 8px; }
-h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 10px; }
-.gear { width: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-.menu { position: absolute; right: 24px; top: 58px; width: min(380px, calc(100vw - 28px)); max-height: calc(100vh - 80px); overflow: auto;
+h2.sub { font-size: 12.5px; font-weight: 600; color: var(--muted); margin: 12px 0 6px; }
+.gear { width: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.menu { position: absolute; right: 12px; top: 44px; width: min(380px, calc(100vw - 28px)); max-height: calc(100vh - 80px); overflow: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); z-index: 20; padding: 6px 0; }
 .menu .sec { padding: 10px 16px; border-top: 1px solid var(--line2); }
 .menu .sec:first-child { border-top: 0; }
@@ -114,9 +115,12 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
 .addpc { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .addpc input { flex: 0 1 280px; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-#banner { display: none; margin-bottom: 16px; padding: 12px 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); color: var(--bad); }
+#banner { display: none; margin-bottom: 10px; padding: 8px 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); color: var(--bad); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (max-width: 640px) { .wrap { padding: 0 14px; } .netpick span { display: none; } }
+.netpick > span:first-child { display: none; }
+#local .pill { max-width: 210px; }
+.info { width: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; }
+.menu .auto { white-space: normal; }
 </style>
 </head>
 <body>
@@ -126,9 +130,13 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
       <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect x="1" y="1" width="26" height="26" rx="7" fill="var(--accent)"></rect><path d="M9 9v6a5 5 0 0 0 10 0V9" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"></path><path d="M14 5v9" stroke="#fff" stroke-width="2.2" stroke-linecap="round"></path></svg>
       USBeam
     </div>
-    <span class="pcchip" id="pcname">This PC</span>
+    <nav class="tabs" aria-label="Sections">
+      <button id="tab-net" class="on" onclick="showTab('net')">Network Devices</button>
+      <button id="tab-local" onclick="showTab('local')">This PC's Devices</button>
+    </nav>
     <div class="spacer"></div>
-    <label class="netpick"><span>Connect over</span>
+    <button class="iconbtn info" id="infobtn" aria-label="About this view" title="">i</button>
+    <label class="netpick" title="Connect over"><span>Connect over</span>
       <select id="net" onchange="act({op:'set_net', value:this.value})"></select>
     </label>
     <button class="iconbtn gear" id="gearbtn" aria-label="Settings" title="Settings" aria-haspopup="true" aria-expanded="false" onclick="toggleMenu(event)">
@@ -136,6 +144,12 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
     </button>
   </div>
   <div id="menu" class="menu" hidden role="dialog" aria-label="Settings">
+    <div class="sec" style="padding:4px 0;border-top:0">
+      <button class="item" onclick="scanHardware()">Scan for hardware changes</button>
+      <div class="small" id="scanstatus" style="padding:0 16px 6px;margin:0" hidden></div>
+    </div>
+    <div class="sec"><div class="lbl">Add a PC by address</div>
+      <div class="line"><label for="addr" class="sr">PC address</label><input type="text" id="addr" placeholder="for example 192.168.0.20" onkeydown="if(event.key==='Enter')addHost()"><button class="btn" onclick="addHost()">Add PC</button></div></div>
     <div class="sec"><div class="lbl">This PC's name</div>
       <div class="line"><input type="text" id="pcnamein" maxlength="40" aria-label="This PC's name" onkeydown="if(event.key==='Enter')saveName()"><button class="btn" onclick="saveName()">Save</button></div>
       <div class="small" id="pcnamehint"></div></div>
@@ -168,23 +182,13 @@ h2.sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 22px 0 
 <main>
   <div class="wrap">
     <div id="banner" role="alert"></div>
-    <nav class="tabs" aria-label="Sections">
-      <button id="tab-net" class="on" onclick="showTab('net')">Network Devices</button>
-      <button id="tab-local" onclick="showTab('local')">This PC's Devices</button>
-    </nav>
     <section id="view-net">
-      <p class="hint" id="nethint"></p>
+      <p class="hint" id="nethint" hidden></p>
       <div id="netnotes"></div>
       <div id="pcs"></div>
-      <div class="addpc">
-        <label for="addr" class="sr">PC address</label>
-        <input id="addr" placeholder="Add a PC by address" onkeydown="if(event.key==='Enter')addHost()">
-        <button class="btn" onclick="addHost()">Add PC</button>
-      </div>
     </section>
     <section id="view-local" hidden>
-      <p class="hint">Devices plugged into this PC. They keep working here until another PC starts using them, and come back here when it lets go.</p>
-      <p class="hint">Closing this window keeps USBeam running. Open it again from its tray icon.</p>
+      <p class="hint"><span class="pcchip" id="pcname">This PC</span></p>
       <div class="box" id="local"></div>
       <div class="note" id="hostnote" hidden></div>
     </section>
@@ -200,12 +204,31 @@ const sysTheme = document.documentElement.dataset.theme || '';
 const ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v14M8 7l4-4 4 4M7 12h2v3M17 10h-2v3"></path><circle cx="12" cy="19" r="2"></circle></svg>';
 const PCICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" style="color:var(--muted)"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg>';
 
+const LOCALHINT = 'Devices plugged into this PC. They keep working here until another PC starts using them, and come back here when it lets go. Closing this window keeps USBeam running; open it again from its tray icon.';
+function setInfo() {
+  const b = document.getElementById('infobtn');
+  b.title = tab === 'local' ? LOCALHINT : document.getElementById('nethint').textContent;
+  b.setAttribute('aria-label', b.title);
+}
 function showTab(t) {
   tab = t;
   for (const x of ['net', 'local']) {
     document.getElementById('tab-' + x).classList.toggle('on', x === t);
     document.getElementById('view-' + x).hidden = x !== t;
   }
+  setInfo();
+}
+document.addEventListener('click', e => { if (e.target.closest('#infobtn')) { e.stopPropagation(); modal(`<h3>${tab === 'local' ? "This PC's Devices" : 'Network Devices'}</h3><p>${esc(document.getElementById('infobtn').title)}</p><div class="acts"><button class="btn primary" onclick="closeModal()">Close</button></div>`); } });
+async function scanHardware() {
+  const el = document.getElementById('scanstatus');
+  el.hidden = false; el.textContent = 'Scanning… this takes a few seconds.';
+  try {
+    const r = await fetch('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-USBeam-Token': token }, body: JSON.stringify({ op: 'scan_hw' }) });
+    const j = await r.json().catch(() => ({}));
+    el.textContent = !r.ok || j.error ? (j.error || 'The scan didn\'t work (' + r.status + ').')
+      : j.found > 0 ? 'Scan finished: found ' + j.found + ' new device' + (j.found === 1 ? '' : 's') + '.' : 'Scan finished: no new devices.';
+  } catch (e) { el.textContent = 'USBeam is not responding.'; }
+  lastPcs = lastLocal = ''; refresh();
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function attr(o) { return esc(JSON.stringify(o)); }
@@ -292,7 +315,7 @@ function remoteRow(pc, d) {
   const sub = [d.vid && d.pid ? d.vid + ':' + d.pid : '', d.busid].filter(Boolean).join(' · ');
   return `<div class="row"><div class="dicon">${ICON}</div>
     <div class="dinfo"><div class="dname">${esc(d.name || 'USB device')}</div><div class="dsub">${esc(sub)}</div>${d.error ? `<div class="derr" role="status">${esc(d.error)}</div>` : ''}</div>
-    <span class="pill ${kind}">${esc(label)}</span>
+    <span class="pill ${kind}" title="${esc(label)}">${esc(label)}</span>
     <label class="auto${locked ? ' off' : ''}" ${locked ? 'title="Set by the PC using this device"' : ''}><input type="checkbox" ${d.auto ? 'checked' : ''} ${locked ? 'disabled' : ''} data-act="${attr(Object.assign({ op: 'auto' }, key))}">Auto-reconnect</label>
     ${btn}</div>`;
 }
@@ -373,11 +396,11 @@ function renderLocal(all) {
       switching: ['Switching…', 'warn', null, null, '']
     }[d.state] || [d.state, '', null, null, ''];
     let label = M[0];
-    const btn = (M[2] && !d.fixed) ? `<button class="btn ${M[4]}" style="min-width:110px" data-act="${attr(Object.assign({ op: M[3] }, id))}">${esc(M[2])}</button>` : '<span class="noact" style="min-width:110px">—</span>';
+    const btn = (M[2] && !d.fixed) ? `<button class="btn ${M[4]}" style="min-width:90px" data-act="${attr(Object.assign({ op: M[3] }, id))}">${esc(M[2])}</button>` : '<span class="noact" style="min-width:90px">—</span>';
     const sub = [d.vid + ':' + d.pid, d.id, d.note].filter(Boolean).join(' · ');
     return `<div class="row"><div class="dicon">${ICON}</div>
       <div class="dinfo"><div class="dname">${esc(d.name)}</div><div class="dsub">${esc(sub)}</div></div>
-      <span class="pill ${M[1]}">${esc(label)}</span>${btn}</div>`;
+      <span class="pill ${M[1]}" title="${esc(label)}">${esc(label)}</span>${btn}</div>`;
   }).join('') + tail;
 }
 
@@ -387,7 +410,7 @@ function toggleMenu(e) {
   const m = document.getElementById('menu'), open = m.hidden;
   m.hidden = !open;
   document.getElementById('gearbtn').setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (open) { document.getElementById('pcnamein').value = (S.prefs && S.prefs.name) || ''; document.getElementById('updstatus').hidden = true; }
+  if (open) { document.getElementById('pcnamein').value = (S.prefs && S.prefs.name) || ''; document.getElementById('updstatus').hidden = true; document.getElementById('scanstatus').hidden = true; }
 }
 document.addEventListener('click', e => { const m = document.getElementById('menu'); if (e.isTrusted && !m.hidden && !m.contains(e.target) && !e.target.closest('#modalbg')) toggleMenu(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); const m = document.getElementById('menu'); if (!m.hidden) toggleMenu(); } });
@@ -579,6 +602,7 @@ async function refresh() {
       document.getElementById('nethint').textContent = s.net === 'auto'
         ? 'Showing PCs on every network this PC can reach. Home network is preferred; ZeroTier or Tailscale is used when you are away.'
         : 'Showing only PCs reachable over ' + label + '.';
+      setInfo();
     }
     const pcs = JSON.stringify([s.pcs, s.client_note, s.restart_needed]);
     if (pcs !== lastPcs) { lastPcs = pcs; renderPcs(s); }

@@ -371,7 +371,7 @@ static void handle_kick(int s, const char *peer, const uint8_t *op) {
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     if (len == 0 || len > 31 || recv_all(s, busid, len)) return;
     busid[len] = 0;
-    HostDev *h = hdev(busid, 0);
+    HostDev *h = is_system_drive(busid) ? NULL : hdev(busid, 0);
     if (!h || !h->exported) { put32b(r + 4, 1); send_all(s, r, 8); return; }
     char name[256], pl[160], by[160];
     peer_label(h->peer, pl, sizeof pl, 0);
@@ -625,6 +625,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     char op[32], id[64];
     json_str(body, "op", op, sizeof op);
     json_str(body, "id", id, sizeof id);
+    if (id[0] && is_system_drive(id)) { sb_printf(out, "%s", "{\"error\":\"This device isn't available.\"}"); return 400; }
     HostDev *h = id[0] ? hdev(id, 0) : NULL;
     int code = 200;
 
@@ -647,6 +648,13 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); g_stop = 1; }
     else if (!strcmp(op, "restart")) { logm("Restart requested from the USBeam app"); g_restart = 1; g_stop = 1; }
     else if (!strcmp(op, "diagnostics")) { diagnostics(out); return 200; }
+    else if (!strcmp(op, "scan_hw")) {
+        host_unlock();                         // takes a few seconds: other PCs and the window carry on meanwhile
+        int found = scan_hardware();
+        host_lock();
+        sb_printf(out, "{\"ok\":true,\"found\":%d}", found);
+        return 200;
+    }
     else if (!strcmp(op, "reset")) {
         for (int i = 0; i < MAXHIDE; i++) { g_hidden[i][0] = 0; g_shared[i][0] = 0; }
         for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && !g_h[i].exported) { g_h[i].blocked = 0; g_h[i].hold_until = 0; }

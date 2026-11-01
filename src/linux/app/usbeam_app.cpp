@@ -286,8 +286,8 @@ public:
     Window() {
         setWindowTitle("USBeam");
         setWindowIcon(appIcon());
-        setMinimumSize(560, 420);
-        QSize sz(1100, 760);
+        setMinimumSize(520, 340);
+        QSize sz(640, 400);                      // opens compact, 16:10
         if (QScreen *s = QGuiApplication::primaryScreen()) sz = sz.boundedTo(s->availableGeometry().size());
         resize(sz);
         view = new QWebEngineView(this);

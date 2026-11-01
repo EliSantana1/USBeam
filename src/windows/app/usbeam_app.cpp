@@ -399,8 +399,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         UINT dpi = GetDpiForWindow(h);
-        ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(560, dpi, 96);
-        ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(420, dpi, 96);
+        ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(520, dpi, 96);
+        ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(340, dpi, 96);
         return 0;
     }
     case WM_CLOSE:
@@ -487,7 +487,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int show) {
     RegisterClassExW(&wc);
 
     UINT dpi = GetDpiForSystem();
-    int w = MulDiv(1100, dpi, 96), hgt = MulDiv(760, dpi, 96);
+    // Opens compact, 16:10: a 640 x 400 page area plus the window's frame and title bar.
+    RECT fr = { 0, 0, MulDiv(640, dpi, 96), MulDiv(400, dpi, 96) };
+    AdjustWindowRectExForDpi(&fr, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+    int w = fr.right - fr.left, hgt = fr.bottom - fr.top;
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     if (w > wa.right - wa.left) w = wa.right - wa.left;
     if (hgt > wa.bottom - wa.top) hgt = wa.bottom - wa.top;
