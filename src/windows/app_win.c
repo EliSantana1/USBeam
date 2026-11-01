@@ -170,6 +170,11 @@ static int plat_networks(NetInfo *out, int max) {
                 else if (x->kind == NET_TS) snprintf(x->name, sizeof x->name, "Tailscale");
                 else if (nname[0]) snprintf(x->name, sizeof x->name, "%s", nname);
                 else w2u(a->FriendlyName, x->name, sizeof x->name);
+                if (x->kind == NET_HOME) {                                  // a VPN app's adapter? (see netpolicy.h)
+                    char d[200], fn[100]; w2u(a->Description, d, sizeof d); w2u(a->FriendlyName, fn, sizeof fn);
+                    char both[310]; snprintf(both, sizeof both, "%s %s", d, fn);
+                    snprintf(x->app, sizeof x->app, "%s", vpn_app(both));
+                }
                 if (x->kind != NET_HOME) x->allowed = 1;                    // the user's own private networks
                 else if (nn < 0) x->allowed = 1;                            // can't tell: the firewall still decides
                 else if (cat == NLM_NETWORK_CATEGORY_PRIVATE || cat == NLM_NETWORK_CATEGORY_DOMAIN_AUTHENTICATED) x->allowed = 1;
@@ -200,6 +205,7 @@ static void save_config(void) {
         if (d->share_forced) fprintf(f, "share %s\n", u);
     }
     LeaveCriticalSection(&g_devs_cs);
+    netapp_save_lines(f);
     cl_lock();
     client_save_lines(f);
     cl_unlock();
@@ -222,7 +228,7 @@ static void load_config(void) {
             Dev *d = dev_slot(w);
             if (d) { if (hide) d->hidden = 1; else d->share_forced = 1; }
         } else if (sscanf(line, "id %32s", a) == 1) snprintf(g_id, sizeof g_id, "%s", a);
-        else client_load_line(line);
+        else if (!netapp_load_line(line)) client_load_line(line);
     }
     fclose(f);
 }
@@ -772,11 +778,20 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         EnterCriticalSection(&g_devs_cs);
         for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used) { g_devs[i].hidden = 0; g_devs[i].share_forced = 0; g_devs[i].blocked = 0; g_devs[i].hold_until = 0; }
         LeaveCriticalSection(&g_devs_cs);
-        nets_lock(); memset(g_nets_later, 0, sizeof g_nets_later); nets_unlock();
+        nets_lock(); memset(g_nets_later, 0, sizeof g_nets_later); memset(g_netapps, 0, sizeof g_netapps); nets_unlock();
         int c2 = 200; client_action("reset_client", body, out, &c2);
+        nets_refresh();
         logm("USBeam was reset to its starting settings");
     }
     else if (!strcmp(op, "net_later")) { char nid[96]; json_str(body, "net", nid, sizeof nid); if (nid[0]) nets_later(nid); }
+    else if (!strncmp(op, "net_app_", 8)) {     // a VPN app: allow / never allow / ask again
+        char app[48] = ""; json_str(body, "app", app, sizeof app);
+        int mode = !strcmp(op, "net_app_allow") ? 1 : !strcmp(op, "net_app_block") ? 2 : 0;
+        netapp_set(app, mode);
+        save_config();
+        nets_refresh();
+        logm("VPN app %s: USBeam %s", app, mode == 1 ? "allowed" : mode == 2 ? "never allowed" : "will ask again");
+    }
     else if (!strcmp(op, "local_cancel")) { if (d && d->hold_until) { d->hold_until = 0; d->blocked = 1; say("[%s] reconnect cancelled: %ls stays on this PC", d->busid, d->name); } }
     else if (!strcmp(op, "local_allow")) { if (d) { d->blocked = 0; d->hold_until = 0; } }
     else if (!strcmp(op, "local_hide")) { if (d) { d->hidden = 1; d->share_forced = 0; save_config(); } }

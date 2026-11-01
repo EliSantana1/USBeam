@@ -252,6 +252,12 @@ static int plat_networks(NetInfo *out, int max) {
             x->allowed = 1;
             continue;
         }
+        snprintf(x->app, sizeof x->app, "%s", vpn_app(i->ifa_name));
+        if (x->app[0]) {                        // a VPN app's network: allowed or not per app (see netpolicy.h)
+            snprintf(x->id, sizeof x->id, "%s@%s", sub, i->ifa_name);
+            snprintf(x->name, sizeof x->name, "%s", i->ifa_name);
+            continue;
+        }
         // Wi-Fi / Ethernet: known by its address range + the hardware address of its router.
         uint32_t gw = if_gateway(i->ifa_name);
         char mac[64] = "";
@@ -284,6 +290,7 @@ static void save_settings(void) {
     pthread_mutex_lock(&g_trust_mx);
     for (int i = 0; i < MAXTRUST; i++) if (g_trust_id[i][0]) fprintf(f, "trustnet %s\t%s\n", g_trust_id[i], g_trust_name[i]);
     pthread_mutex_unlock(&g_trust_mx);
+    netapp_save_lines(f);
     cl_lock();
     client_save_lines(f);
     cl_unlock();
@@ -304,7 +311,7 @@ static void load_settings(void) {
             char tid[96] = "", tname[96] = "";
             if (sscanf(line + 9, "%95[^\t\n]\t%95[^\n]", tid, tname) >= 1) set_trusted(tid, tname, 1);
         }
-        else client_load_line(line);
+        else if (!netapp_load_line(line)) client_load_line(line);
     }
     fclose(f);
 }
@@ -645,6 +652,14 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         logm("Network %s: USBeam %s", nname[0] ? nname : nid, on ? "allowed" : "no longer allowed");
     }
     else if (!strcmp(op, "net_later")) { if (nid[0]) nets_later(nid); }
+    else if (!strncmp(op, "net_app_", 8)) {     // a VPN app: allow / never allow / ask again
+        char app[48] = ""; json_str(body, "app", app, sizeof app);
+        int mode = !strcmp(op, "net_app_allow") ? 1 : !strcmp(op, "net_app_block") ? 2 : 0;
+        netapp_set(app, mode);
+        save_settings();
+        nets_refresh();
+        logm("VPN app %s: USBeam %s", app, mode == 1 ? "allowed" : mode == 2 ? "never allowed" : "will ask again");
+    }
     else if (!strcmp(op, "quit")) { logm("Quit requested from the USBeam app"); g_stop = 1; }
     else if (!strcmp(op, "restart")) { logm("Restart requested from the USBeam app"); g_restart = 1; g_stop = 1; }
     else if (!strcmp(op, "diagnostics")) { diagnostics(out); return 200; }
@@ -659,7 +674,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         for (int i = 0; i < MAXHIDE; i++) { g_hidden[i][0] = 0; g_shared[i][0] = 0; }
         for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && !g_h[i].exported) { g_h[i].blocked = 0; g_h[i].hold_until = 0; }
         pthread_mutex_lock(&g_trust_mx); memset(g_trust_id, 0, sizeof g_trust_id); pthread_mutex_unlock(&g_trust_mx);
-        nets_lock(); memset(g_nets_later, 0, sizeof g_nets_later); nets_unlock();
+        nets_lock(); memset(g_nets_later, 0, sizeof g_nets_later); memset(g_netapps, 0, sizeof g_netapps); nets_unlock();
         int c2 = 200; client_action("reset_client", body, out, &c2);
         nets_refresh();
         logm("USBeam was reset to its starting settings");

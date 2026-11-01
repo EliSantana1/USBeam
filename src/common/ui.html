@@ -339,12 +339,23 @@ function renderPcs(s) {
 function renderNetInfo(s) {
   const nets = s.networks || [];
   let html = '';
+  const appSeen = new Set();
   for (const n of nets) {
-    if (n.allowed || n.pending || n.later || n.kind !== 'home') continue;
+    if (n.allowed || n.pending || n.later || n.blocked || n.kind !== 'home') continue;
     const later = `<button class="btn" data-act="${attr({ op: 'net_later', net: n.id })}">Not now</button>`;
+    if (n.app) {                       // a VPN app's network (not ZeroTier or Tailscale): one note per app
+      if (appSeen.has(n.app)) continue;
+      appSeen.add(n.app);
+      const who = n.app === 'VPN (app unknown)' ? 'a VPN app USBeam doesn\'t recognize' : `${esc(n.app)}, a VPN app`;
+      html += `<div class="netnote"><div class="txt"><b>USBeam is off on “${esc(n.name)}” (${n.app === 'VPN (app unknown)' ? 'VPN' : esc(n.app)}).</b>
+        <div>This network comes from ${who}. USBeam doesn't need it: your PCs are reached over your home network, ZeroTier or Tailscale. <b>Recommended: Never allow.</b> You can change this later in the gear menu.</div></div>
+        <div class="acts"><button class="btn primary" data-act="${attr({ op: 'net_app_block', app: n.app })}">Never allow</button>
+        <button class="btn" data-act="${attr({ op: 'net_app_allow', app: n.app })}">Allow</button>${later}</div></div>`;
+      continue;
+    }
     if (s.os === 'linux') {
       html += `<div class="netnote"><div class="txt"><b>USBeam is off on “${esc(n.name)}”.</b>
-        <div>Other PCs can't see or use this PC on this network (${esc(n.subnet)}), and it doesn't look for them. Allow it only on networks you trust, like your home or office.</div></div>
+        <div>Other PCs can't see or use this PC on this network (${esc(n.subnet)}), and it doesn't look for them. <b>Recommended: Allow if this is your home or office network.</b></div></div>
         <div class="acts"><button class="btn primary" data-act="${attr({ op: 'net_allow', net: n.id })}">Allow</button>${later}</div></div>`;
     } else {
       html += `<div class="netnote"><div class="txt"><b>USBeam is off on “${esc(n.name)}” because Windows marks it as a Public network.</b>
@@ -360,19 +371,32 @@ function renderNetInfo(s) {
     if (seen.has(n.id) || n.pending) continue;
     seen.add(n.id);
     let btn = '';
+    if (n.app) {
+      btn = n.allowed ? `<button class="btn" data-act="${attr({ op: 'net_app_forget', app: n.app })}">Turn off</button>`
+          : n.blocked ? `<button class="btn" data-act="${attr({ op: 'net_app_allow', app: n.app })}">Re-allow</button>`
+          : `<button class="btn" data-act="${attr({ op: 'net_app_allow', app: n.app })}">Allow</button>`;
+      t += `<div class="netl"><span class="nm">${esc(n.name)} <span class="small">${esc(n.app)}</span></span>
+        <span class="st ${n.allowed ? 'on' : 'off'}">${n.allowed ? 'On' : (n.blocked ? 'Never allowed' : 'Off')}</span>${btn}</div>`;
+      continue;
+    }
     if (s.os === 'linux' && n.kind === 'home')
       btn = n.allowed ? `<button class="btn" data-act="${attr({ op: 'net_forget', net: n.id })}">Turn off</button>`
                       : `<button class="btn" data-act="${attr({ op: 'net_allow', net: n.id })}">Allow</button>`;
     t += `<div class="netl"><span class="nm">${esc(n.name)} <span class="small">${esc(n.subnet)}</span></span>
       <span class="st ${n.allowed ? 'on' : 'off'}">${n.allowed ? 'On' : (n.public ? 'Off (Public)' : 'Off')}</span>${btn}</div>`;
   }
+  const present = new Set(nets.map(n => n.app).filter(Boolean));
+  const apps = (s.netapps || []).filter(a => !present.has(a.app));
+  if (apps.length) t += '<div class="small">VPN apps:</div>' + apps.map(a => `<div class="netl"><span class="nm">${esc(a.app)}</span>
+    <span class="st ${a.blocked ? 'off' : 'on'}">${a.blocked ? 'Never allowed' : 'Allowed'}</span>
+    <button class="btn" data-act="${attr({ op: a.blocked ? 'net_app_allow' : 'net_app_forget', app: a.app })}">${a.blocked ? 'Re-allow' : 'Turn off'}</button></div>`).join('');
   if (s.os === 'linux') {
     const others = (s.trusted || []).filter(x => !seen.has(x.id));
     if (others.length) t += '<div class="small">Allowed earlier:</div>' + others.map(x => `<div class="netl"><span class="nm">${esc(x.name)}</span>
       <button class="btn" data-act="${attr({ op: 'net_forget', net: x.id })}">Remove</button></div>`).join('');
-    t += '<div class="small">ZeroTier and Tailscale are always on. Other networks only after you allow them.</div>';
+    t += '<div class="small">ZeroTier and Tailscale are always on. Other networks and VPN apps only after you allow them.</div>';
   } else {
-    t += `<div class="small">On for networks Windows marks Private, always on for ZeroTier and Tailscale, off on Public networks.</div>
+    t += `<div class="small">On for networks Windows marks Private, always on for ZeroTier and Tailscale, off on Public networks. Other VPN apps only after you allow them.</div>
       <div class="line" style="margin-top:6px"><button class="btn" onclick="appLink('open', {url: 'ms-settings:network-status'})">Windows network settings</button></div>`;
   }
   document.getElementById('menunets').innerHTML = t || '<div class="small">No networks.</div>';
