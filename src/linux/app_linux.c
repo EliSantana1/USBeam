@@ -277,6 +277,21 @@ static int plat_networks(NetInfo *out, int max) {
     return n;
 }
 
+// ---------------------------------------------------------------- sleep and wake
+// Before sleeping: devices other PCs use from this one go back to this PC (so those PCs see a
+// clean release instead of a connection that just stops), and devices used here from other PCs
+// are let go (see client_sleep). After waking: other PCs are looked for again at once.
+static void power_sleep(void) {
+    int n = 0;
+    host_lock();
+    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) { return_to_host(g_h[i].busid); g_h[i].exported = 0; n++; }
+    host_unlock();
+    if (n) logm("Going to sleep: %d shared device(s) returned to this PC", n);
+    client_sleep();
+}
+static void power_wake(void) { client_wake(); }
+#include "sleepwatch.h"
+
 // ---------------------------------------------------------------- settings
 static void save_settings(void) {
     host_lock();
@@ -883,7 +898,8 @@ static int cmd_app(int service) {
     if (!uitest) vhci_cleanup();
     write_token_file();
     g_uitest = uitest;
-    pthread_t ct, ht, dt;
+    pthread_t ct, ht, dt, swt;
+    if (!uitest) pthread_create(&swt, NULL, sleepwatch_main, NULL);
     pthread_create(&ct, NULL, client_main, NULL);
     pthread_create(&ht, NULL, host_main, (void *)(intptr_t)ls);
     pthread_create(&dt, NULL, disco_main, (void *)(intptr_t)us);
@@ -911,6 +927,7 @@ static int cmd_app(int service) {
     for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) return_to_host(g_h[i].busid);
     host_unlock();
     pthread_join(ct, NULL);
+    if (!uitest) pthread_join(swt, NULL);
     client_release_all();
     unlink("/run/usbeam/ui-token");
     if (g_restart) { logm("Restarting..."); return 3; }    // systemd starts the service again (Restart=on-failure)

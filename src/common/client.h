@@ -340,8 +340,15 @@ static const char *plat_attach_error(void);
 static int plat_restart_needed(void);
 static void peer_label(const char *ip, char *out, size_t n, int cl_held);
 
+static volatile int g_cl_asleep;   // between "about to sleep" and "woke up": don't connect anything
+static unsigned long long g_cl_asleep_at;
+static void client_wake(void);
 static void client_tick(void) {
     unsigned long long now = now_ms();
+    if (g_cl_asleep) {
+        if (now - g_cl_asleep_at < 60000) return;
+        client_wake();                     // the "woke up" message never came: carry on anyway
+    }
     // 1. Poll every address of every PC that is due.
     // A PC that isn't answering gets a short time limit, so it can't slow everything else down.
     char ips[CL_MAXR * CL_MAXA][64]; int tmo[CL_MAXR * CL_MAXA]; int nip = 0;
@@ -490,6 +497,7 @@ static void client_tick(void) {
         }
         cl_unlock();
         if (!ip[0] || !listed) { cl_lock(); g_use[i].next_try = now + 2000; cl_unlock(); continue; }
+        if (g_cl_asleep) break;
         int port = plat_attach(ip, u.busid);
         cl_lock();
         if (g_use[i].used && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
@@ -506,6 +514,37 @@ static void client_tick(void) {
         if (port >= 0) { cl_lock(); fail_clear(u.pc, u.busid); cl_unlock(); logm("[%s] attached from %s on port %d", u.busid, ip, port); plat_tune(); }
     }
     if (changed) client_save();
+}
+
+// Sleep and wake (the platform calls these when the PC is about to sleep or hibernate, and after).
+// A sleeping PC can't keep using devices from other PCs (Linux won't even go to sleep while it
+// has one), so every one is let go first. Each goes back to its own PC; those with Auto-reconnect
+// come back here by themselves after waking, the others stay there.
+static void client_sleep(void) {
+    int ports[CL_MAXW], n = 0;
+    cl_lock();
+    g_cl_asleep = 1; g_cl_asleep_at = now_ms();
+    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) ports[n++] = g_use[i].port;
+    cl_unlock();
+    if (!n) return;
+    plat_client_tick_begin();
+    for (int k = 0; k < n; k++) plat_detach(ports[k]);
+    plat_stop_retries();
+    cl_lock();
+    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used) {
+        g_use[i].port = -1; g_use[i].next_try = 0;
+        if (!g_use[i].autorc) g_use[i].used = 0;
+    }
+    cl_unlock();
+    client_save();
+    logm("Going to sleep: released %d device(s) used here (Auto-reconnect ones come back after waking)", n);
+}
+static void client_wake(void) {
+    cl_lock();
+    for (int i = 0; i < CL_MAXR; i++) if (g_r[i].id[0]) { g_r[i].next_poll = 0; g_r[i].offline_since = 0; }
+    g_cl_asleep = 0;
+    cl_unlock();
+    logm("Woke up: looking for other PCs and reconnecting");
 }
 
 // Release everything (quitting).

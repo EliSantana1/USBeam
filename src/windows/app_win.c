@@ -831,10 +831,22 @@ static wchar_t g_data_dir[MAX_PATH];
 static void svc_report(DWORD state) {
     g_svc_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_svc_status.dwCurrentState = state;
-    g_svc_status.dwControlsAccepted = state == SERVICE_RUNNING ? (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN) : 0;
+    g_svc_status.dwControlsAccepted = state == SERVICE_RUNNING ? (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_POWEREVENT) : 0;
     g_svc_status.dwWaitHint = state == SERVICE_RUNNING ? 0 : 15000;
     if (g_svc) SetServiceStatus(g_svc, &g_svc_status);
 }
+
+// Sleep and wake. Windows tells the service before sleeping or hibernating (it waits for this to
+// finish, briefly) and after waking. Before sleeping: devices other PCs use from this one return
+// to this PC (they see a clean release), and devices used here from other PCs are let go (see
+// client_sleep in client.h). After waking: other PCs are looked for again at once.
+static void power_sleep(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use) { end_session(&g_devs[i]); n++; }
+    if (n) logm("Going to sleep: %d shared device(s) returned to this PC", n);
+    if (have_usbip()) client_sleep();
+}
+static void power_wake(void) { client_wake(); }
 
 static DWORD WINAPI svc_ctrl(DWORD ctrl, DWORD type, LPVOID data, LPVOID ctx) {
     if (ctrl == SERVICE_CONTROL_PRESHUTDOWN) {          // a real shut down / restart
@@ -844,6 +856,11 @@ static DWORD WINAPI svc_ctrl(DWORD ctrl, DWORD type, LPVOID data, LPVOID ctx) {
         return NO_ERROR;
     }
     if (ctrl == SERVICE_CONTROL_STOP) { svc_report(SERVICE_STOP_PENDING); SetEvent(g_quit_event); return NO_ERROR; }
+    if (ctrl == SERVICE_CONTROL_POWEREVENT) {
+        if (type == PBT_APMSUSPEND) power_sleep();
+        else if (type == PBT_APMRESUMEAUTOMATIC) power_wake();
+        return NO_ERROR;
+    }
     if (ctrl == SERVICE_CONTROL_INTERROGATE) return NO_ERROR;
     return ERROR_CALL_NOT_IMPLEMENTED;
 }

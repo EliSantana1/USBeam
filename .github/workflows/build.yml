@@ -130,6 +130,8 @@ jobs:
         run: sudo bash tests/netdrop.sh
       - name: System-drive test (the drive the running system lives on is never shared or touched)
         run: sudo bash tests/sysdrive.sh
+      - name: Sleep test (devices are let go before the PC sleeps and picked up after waking)
+        run: bash tests/sleep.sh
 
   # Install the previous release, update to this build (also from inside the app), start the app
   # several times, uninstall: one app and one runtime at every step, nothing left behind.
