@@ -166,6 +166,7 @@ typedef struct Dev {
     int is_light;            // lighting (RGB/LED) controller (opt-in like drives)
     int is_system;           // holds the running Windows: never listed, shared or touched (stays set)
     ULONGLONG sys_checked;   // when is_system was last worked out (GetTickCount64), 0 = not yet
+    char taken_from[40];     // USBeam id of the PC this PC took it back from ("Take back"), until it's used again
     ULONGLONG drive_busy_until; // a drive refused to go because files are open on this PC (shown for a while)
     int hidden, share_forced;// user's choice: "Don't share" / "Share" (drives)
     int blocked;             // temporarily kept on this PC (refuse clients)
@@ -1097,6 +1098,7 @@ static DWORD WINAPI conn_main(LPVOID arg) {
             logm("%s asked for %s: not available", c->peer, busid);
             goto done;
         }
+        d->taken_from[0] = 0;
         LeaveCriticalSection(&g_devs_cs);
         d->quit = 0;
         if (d->is_storage && !d->is_radio && !d->on_winusb && drive_in_use(d)) {

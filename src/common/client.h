@@ -46,7 +46,7 @@
 #include "client_types.h"
 static const char *NET_KEY[] = { "auto", "home", "zerotier", "tailscale" };
 static const char *NET_LABEL[] = { "Automatic", "Home network", "ZeroTier", "Tailscale" };
-typedef struct { char busid[32], name[128], vid[8], pid[8], state[16], peer[64]; int countdown, input; } RDev;
+typedef struct { char busid[32], name[128], vid[8], pid[8], state[16], peer[64], taken[40]; int countdown, input; } RDev;
 typedef struct { char ip[64]; int kind, ok; } RAddr;
 typedef struct {
     char id[40], name[64];
@@ -68,6 +68,7 @@ typedef struct {
     int input;                  // a keyboard or mouse (Auto-release applies)
     unsigned long long next_try;
     unsigned long long attached_at;   // when it was connected here (for Auto-release)
+    unsigned long long ended_at;      // when its connection ended (0 = hasn't)
     char name[128], vid[8], pid[8];  // last seen details (shown if the PC drops off for a while)
 } Use;
 
@@ -107,6 +108,13 @@ static Remote *rm_find(const char *id) {
 static Remote *rm_by_ip(const char *ip) {
     for (int i = 0; i < CL_MAXR; i++) if (g_r[i].id[0]) for (int k = 0; k < g_r[i].naddr; k++) if (!strcmp(g_r[i].addr[k].ip, ip)) return &g_r[i];
     return NULL;
+}
+// The USBeam id of the PC at this address, or "" (cl_lock taken here).
+static void id_of_ip(const char *ip, char *out, size_t n) {
+    cl_lock();
+    Remote *r = rm_by_ip(ip);
+    snprintf(out, n, "%s", r ? r->id : "");
+    cl_unlock();
 }
 static Remote *rm_new(const char *id) {
     for (int i = 0; i < CL_MAXR; i++) if (!g_r[i].id[0]) {
@@ -270,6 +278,7 @@ static int poll_pc(const char *ip, PollResult *out, int ms) {
             json_str(obj, "peer", d->peer, sizeof d->peer);
             const char *c = json_find(obj, "countdown"); d->countdown = c ? atoi(c) : 0;
             d->input = json_bool(obj, "input");
+            json_str(obj, "taken_from", d->taken, sizeof d->taken);
             p = e + 1;
         }
         free(js);
@@ -471,7 +480,7 @@ static void client_tick(void) {
             logm("[%s] connection ended", u.busid);
             plat_stop_retries();                 // only USBeam decides about reconnecting (Auto-reconnect)
             cl_lock();
-            g_use[i].port = -1;
+            g_use[i].port = -1; g_use[i].ended_at = now;
             if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
             cl_unlock();
             continue;
@@ -485,13 +494,16 @@ static void client_tick(void) {
         if (r && r->via >= 0) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, u.busid)) {
             if (!strcmp(r->dev[k].state, "available")) listed = 1;
             else if (!strcmp(r->dev[k].state, "kept")) kept = 1;
+            // Its own PC took it back from this PC ("Take back" there) a moment ago: don't grab it
+            // again. It stays available to every PC, this one too (Use).
+            if (!strcmp(r->dev[k].taken, g_id) && u.ended_at && now - u.ended_at < 60000) kept = 1;
         }
         // The host chose to keep this device (Cancel or Take back there): the host's choice
         // wins, so stop waiting and turn Auto-reconnect off for it.
         if (kept && g_use[i].used && g_use[i].port < 0 && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
             g_use[i].used = 0;
             cl_unlock();
-            logm("[%s] the host kept this device: stopped waiting, Auto-reconnect off", u.busid);
+            logm("[%s] taken back by its own PC: stopped waiting, Auto-reconnect off", u.busid);
             changed = 1;
             continue;
         }
@@ -880,7 +892,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
             if (!strcmp(op, "release")) u->release = 1;
             else if (!strcmp(op, "auto")) { u->autorc = on; if (!on && !u->want) u->used = 0; }
             else {
-                u->want = 1; u->next_try = 0; u->release = 0;
+                u->want = 1; u->next_try = 0; u->release = 0; u->ended_at = 0;
                 fail_clear(pc, busid);
                 Remote *r = rm_find(pc);
                 if (r) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, busid) && r->dev[k].name[0]) {

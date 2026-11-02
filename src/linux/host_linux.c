@@ -37,6 +37,7 @@ typedef struct {
     int blocked;         // refuse clients for now
     time_t hold_until;   // countdown end, 0 = none
     int last_shown;
+    char taken_from[40]; // USBeam id of the PC this PC took it back from ("Take back"), until it's used again
 } HostDev;
 
 static HostDev g_h[MAXH];
@@ -570,7 +571,7 @@ static void handle_import(int s, const char *peer) {
         return;
     }
     HostDev *h = hdev(busid, 1);
-    h->exported = 1; h->returning = 0;
+    h->exported = 1; h->returning = 0; h->taken_from[0] = 0;
     snprintf(h->peer, sizeof h->peer, "%s", peer);
     logm("[%s] %s is now in use by %s", busid, name, peer);
 }

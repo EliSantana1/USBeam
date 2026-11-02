@@ -318,6 +318,7 @@ static void handle_info(SOCKET s) {
         int input = d->have_desc && devp_is_input((const unsigned char (*)[3])d->iface_class, d->num_ifaces);
         sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", d->vid, d->pid, st, cd, input ? "true" : "false");
         sb_jstr(&j, d->in_use ? d->peer : "");
+        sb_add(&j, ",\"taken_from\":", 14); sb_jstr(&j, d->taken_from);
         sb_add(&j, "}", 1);
     }
     LeaveCriticalSection(&g_devs_cs);
@@ -801,7 +802,17 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
             d->hidden = 0; d->share_forced = d->is_storage || d->is_light; d->blocked = 0; d->hold_until = 0; save_config();
         }
     }
-    else if (!strcmp(op, "local_disconnect")) { if (d && d->in_use) { d->blocked = 1; say("[%s] taking %ls back from %s", d->busid, d->name, d->peer); end_session(d); } }
+    else if (!strcmp(op, "local_disconnect")) {
+        // Back to this PC; still shared (only "Don't share" stops that). Held back only while the
+        // session ends; the PC it came from is told, so its Auto-reconnect doesn't take it straight back.
+        if (d && d->in_use) {
+            char pid[40]; id_of_ip(d->peer, pid, sizeof pid);
+            d->blocked = 1; say("[%s] taking %ls back from %s", d->busid, d->name, d->peer);
+            end_session(d);
+            snprintf(d->taken_from, sizeof d->taken_from, "%s", pid);
+            d->blocked = !pid[0];        // that PC isn't known by its USBeam id: kept here instead, as before
+        }
+    }
     else if (client_action(op, body, out, &code)) { if (code != 200) return code; }
     else { sb_printf(out, "%s", "{\"error\":\"unknown action\"}"); return 400; }
     sb_printf(out, "%s", "{\"ok\":true}");

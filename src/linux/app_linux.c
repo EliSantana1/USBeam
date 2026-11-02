@@ -372,6 +372,7 @@ static void handle_info(int s) {
         sb_add(&j, ",\"name\":", 8); sb_jstr(&j, dev_name(ids[i], name, sizeof name));
         sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", attr_hex(ids[i], "idVendor"), attr_hex(ids[i], "idProduct"), st, cd, is_input_dev(ids[i]) ? "true" : "false");
         sb_jstr(&j, peer);
+        { HostDev *th = hdev(ids[i], 0); sb_add(&j, ",\"taken_from\":", 14); sb_jstr(&j, th ? th->taken_from : ""); }
         sb_add(&j, "}", 1);
     }
     sb_add(&j, "]}", 2);
@@ -704,7 +705,15 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         save_settings();
     }
     else if (!strcmp(op, "local_disconnect")) {
-        if (h && h->exported) { return_to_host(id); h->exported = 0; h->blocked = 1; logm("[%s] taken back from %s", id, h->peer); }
+        // Back to this PC; still shared (only "Don't share" stops that). The PC it came from is told,
+        // so its Auto-reconnect doesn't take it straight back.
+        // (If that PC isn't known by its USBeam id, it's kept here instead, as before.)
+        if (h && h->exported) {
+            return_to_host(id); h->exported = 0;
+            id_of_ip(h->peer, h->taken_from, sizeof h->taken_from);
+            if (!h->taken_from[0]) h->blocked = 1;
+            logm("[%s] taken back from %s%s", id, h->peer, h->blocked ? " (kept on this PC)" : "");
+        }
     }
     else if (client_action(op, body, out, &code)) { if (code != 200) return code; }
     else { sb_printf(out, "%s", "{\"error\":\"unknown action\"}"); return 400; }

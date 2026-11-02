@@ -134,6 +134,8 @@ jobs:
         run: bash tests/sleep.sh
       - name: JSON reading test (countdowns from other PCs are read correctly)
         run: gcc -O2 -Wall -Werror -Wno-unused-function -o build/json_test tests/json_test.c && build/json_test
+      - name: Take-back test (a device taken back stays shared; the PC it came from doesn't grab it again)
+        run: gcc -O2 -Wall -Werror -Wno-unused-function -o build/takeback_test tests/takeback_test.c && build/takeback_test
 
   # Install the previous release, update to this build (also from inside the app), start the app
   # several times, uninstall: one app and one runtime at every step, nothing left behind.
