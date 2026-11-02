@@ -61,16 +61,19 @@ static void sb_jstr(sb_t *b, const char *s) {
 static void sb_free(sb_t *b) { free(b->p); b->p = NULL; b->len = b->cap = 0; }
 
 // ---------------------------------------------------------------- tiny JSON reading (flat objects only)
+// The value of "key", or NULL. Only a key counts (followed by ':'), not the same word used as a
+// value: in {"state":"countdown","countdown":7} the countdown is 7.
 static const char *json_find(const char *js, const char *key) {
     char pat[64]; snprintf(pat, sizeof pat, "\"%s\"", key);
-    const char *p = strstr(js, pat);
-    if (!p) return NULL;
-    p += strlen(pat);
-    while (*p && isspace((unsigned char)*p)) p++;
-    if (*p != ':') return NULL;
-    p++;
-    while (*p && isspace((unsigned char)*p)) p++;
-    return p;
+    for (const char *p = strstr(js, pat); p; p = strstr(p + 1, pat)) {
+        const char *q = p + strlen(pat);
+        while (*q && isspace((unsigned char)*q)) q++;
+        if (*q != ':') continue;
+        q++;
+        while (*q && isspace((unsigned char)*q)) q++;
+        return q;
+    }
+    return NULL;
 }
 static int json_str(const char *js, const char *key, char *out, size_t n) {
     const char *p = json_find(js, key);

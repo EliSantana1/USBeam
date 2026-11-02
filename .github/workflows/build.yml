@@ -132,6 +132,8 @@ jobs:
         run: sudo bash tests/sysdrive.sh
       - name: Sleep test (devices are let go before the PC sleeps and picked up after waking)
         run: bash tests/sleep.sh
+      - name: JSON reading test (countdowns from other PCs are read correctly)
+        run: gcc -O2 -Wall -Werror -Wno-unused-function -o build/json_test tests/json_test.c && build/json_test
 
   # Install the previous release, update to this build (also from inside the app), start the app
   # several times, uninstall: one app and one runtime at every step, nothing left behind.

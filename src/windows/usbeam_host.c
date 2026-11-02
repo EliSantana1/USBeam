@@ -666,19 +666,23 @@ static BOOL cycle_port(DEVINST di) {
 
 // Make the new driver load: ask Windows to remove + re-detect the device;
 // if a program refuses (has it open), power-cycle its port; last resort
-// disable/enable.
-static BOOL restart_device(const wchar_t *inst) {
+// disable/enable. `refused`: Windows already tried to remove it while installing the driver and
+// was refused, so asking again would only wait for the same refusal (several seconds).
+static BOOL restart_device(const wchar_t *inst, BOOL refused) {
     DEVINST di, parent;
     if (CM_Locate_DevNodeW(&di, (DEVINSTID_W)inst, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return FALSE;
     if (CM_Get_Parent(&parent, di, 0) != CR_SUCCESS) return FALSE;
-    PNP_VETO_TYPE vt = 0; wchar_t vname[MAX_PATH] = L"";
-    CONFIGRET cr = CM_Query_And_Remove_SubTreeW(di, &vt, vname, MAX_PATH, CM_REMOVE_UI_NOT_OK);
-    if (cr == CR_SUCCESS) {
-        CM_Reenumerate_DevNode(parent, CM_REENUMERATE_SYNCHRONOUS);
-        logm("restart: removed and re-detected");
-        return TRUE;
+    if (refused) logm("restart: Windows was refused removing it during the driver install, trying port power-cycle");
+    else {
+        PNP_VETO_TYPE vt = 0; wchar_t vname[MAX_PATH] = L"";
+        CONFIGRET cr = CM_Query_And_Remove_SubTreeW(di, &vt, vname, MAX_PATH, CM_REMOVE_UI_NOT_OK);
+        if (cr == CR_SUCCESS) {
+            CM_Reenumerate_DevNode(parent, CM_REENUMERATE_SYNCHRONOUS);
+            logm("restart: removed and re-detected");
+            return TRUE;
+        }
+        logm("restart: remove refused (cr=%lu veto=%d by %ls), trying port power-cycle", cr, (int)vt, vname);
     }
-    logm("restart: remove refused (cr=%lu veto=%d by %ls), trying port power-cycle", cr, (int)vt, vname);
     if (cycle_port(di)) return TRUE;
     if (CM_Disable_DevNode(di, CM_DISABLE_UI_NOT_OK) == CR_SUCCESS) {
         CM_Enable_DevNode(di, 0);
@@ -736,7 +740,7 @@ static BOOL share_device(Dev *d) {
         say("  Sharing failed. The device was left on its normal driver.");
         return FALSE;
     }
-    if (!restart_device(d->inst)) logm("[%s] software restart failed", d->busid);
+    if (!restart_device(d->inst, reboot)) logm("[%s] software restart failed", d->busid);
     for (int i = 0; i < 20; i++) {          // wait up to ~10 s for the device to come back on WinUSB
         Sleep(500);
         refresh_devices();
