@@ -32,6 +32,10 @@ show()     { echo "USBeam apps:"; for p in $(apps); do echo "  $p $(readlink /pr
 wait_for() { local what=$1 t=$2; shift 2; for _ in $(seq 1 "$t"); do "$@" && return 0; sleep 1; done; fail "$what (waited $t s)"; return 1; }
 installed() { [ "$(cat /opt/usbeam/installed 2>/dev/null)" = "$1" ]; }
 one_app()   { [ "$(apps | wc -l)" = 1 ]; }
+# The installed app is running, and only it: one app, one runtime, and that runtime is the installed
+# AppImage. (Right after installing, the installer itself is still running for a moment and is also
+# a USBeam app: it must not be mistaken for the installed one.)
+installed_app() { one_app && [ "$(runtimes)" != "" ] && runtimes | grep -qx "[0-9]* /opt/usbeam/USBeam.AppImage" && [ "$(runtimes | wc -l)" = 1 ]; }
 
 # What must be true while USBeam runs: one app, one runtime (the installed copy, not a replaced one).
 check_clean() {
@@ -56,7 +60,7 @@ say "1. Install the previous release ($(basename "$OLD"))"
 mkdir -p "$HOME/Downloads"; cp "$OLD" "$HOME/Downloads/USBeam-old.AppImage"; chmod +x "$HOME/Downloads/USBeam-old.AppImage"
 start "$HOME/Downloads/USBeam-old.AppImage" --install
 wait_for "the previous release didn't install" 180 test -f /opt/usbeam/installed
-wait_for "the previous release's app didn't start" 60 one_app
+wait_for "the previous release's app didn't start" 60 installed_app
 show
 
 say "2. Update it to $NEWVER the way the previous release does"
@@ -64,6 +68,7 @@ say "2. Update it to $NEWVER the way the previous release does"
 # old app's open files (its AppImage runtime's pipe and folder). Recreate that: start the new file
 # with copies of those files, then close the old app.
 old_app=$(apps | head -n 1)
+echo "Old app: $old_app ($(tr '\0' ' ' < /proc/"$old_app"/cmdline 2>/dev/null))"
 mkdir -p "$HOME/.cache/USBeam"; cp "$NEW" "$HOME/.cache/USBeam/USBeam-$NEWVER.AppImage"; chmod +x "$HOME/.cache/USBeam/USBeam-$NEWVER.AppImage"
 inherit=""; n=10
 for fd in /proc/"$old_app"/fd/*; do
