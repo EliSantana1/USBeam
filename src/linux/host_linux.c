@@ -92,45 +92,16 @@ static int on_vhci(const char *busid) {
 }
 
 // ---------------------------------------------------------------- system drives: never shown, never touched
-// A USB drive the running system lives on (see sysdrive.h) is left completely alone: not listed,
-// not shared, never unbound, reset or re-probed, whatever is asked. Once found it stays protected
-// until the PC restarts, even if something on it is unmounted for a moment (recorded in /run,
-// which starts empty after every restart).
-#define SYSDRV_FILE "/run/usbeam/system-drives"
-static char g_sysdrv[64][48];                 // "busid devnum": the same physical connection
-static int g_nsysdrv, g_sysdrv_loaded;
-static struct { char busid[32]; time_t at; } g_sysdrv_no[64];   // recently checked, not system
-static int is_system_drive(const char *busid) {
+// See sysdrv_check in sysdrive.h. "busid devnum" identifies the same physical connection.
+static int sysdrive_check(const char *busid, int fresh) {
     if (!busid || !busid[0] || !strncmp(busid, "usb", 3) || strchr(busid, ':')) return 0;
     char key[48], dn[16] = "";
     read_attr(busid, "devnum", dn, sizeof dn);
     snprintf(key, sizeof key, "%s %s", busid, dn);
-    if (!g_sysdrv_loaded) {
-        g_sysdrv_loaded = 1;
-        FILE *f = fopen(SYSDRV_FILE, "r");
-        char l[64];
-        while (f && fgets(l, sizeof l, f) && g_nsysdrv < 64) { l[strcspn(l, "\r\n")] = 0; if (l[0]) snprintf(g_sysdrv[g_nsysdrv++], 48, "%s", l); }
-        if (f) fclose(f);
-    }
-    for (int i = 0; i < g_nsysdrv; i++) if (!strcmp(g_sysdrv[i], key)) return 1;
-    // Not system a moment ago: check again only every 10 s (each check opens its disks briefly).
-    time_t now = time(NULL); int slot = -1;
-    for (int i = 0; i < 64; i++) {
-        if (!strcmp(g_sysdrv_no[i].busid, busid)) { if (now - g_sysdrv_no[i].at < 10) return 0; slot = i; break; }
-        if (slot < 0 && (!g_sysdrv_no[i].busid[0] || now - g_sysdrv_no[i].at > 60)) slot = i;
-    }
-    if (sysdrv_usb_is_system(busid)) {
-        if (slot >= 0 && !strcmp(g_sysdrv_no[slot].busid, busid)) g_sysdrv_no[slot].busid[0] = 0;
-        if (g_nsysdrv < 64) snprintf(g_sysdrv[g_nsysdrv++], 48, "%s", key);
-        mkdir("/run/usbeam", 0755);
-        FILE *f = fopen(SYSDRV_FILE, "a");
-        if (f) { fprintf(f, "%s\n", key); fclose(f); }
-        logm("[%s] holds the running system: never listed or touched by USBeam", busid);
-        return 1;
-    }
-    if (slot >= 0) { snprintf(g_sysdrv_no[slot].busid, 32, "%s", busid); g_sysdrv_no[slot].at = now; }
-    return 0;
+    return sysdrv_check(key, busid, fresh, sysdrv_usb_state);
 }
+static int is_system_drive(const char *busid) { return sysdrive_check(busid, 0); }        // for listing
+static int is_system_drive_now(const char *busid) { return sysdrive_check(busid, 1); }    // before acting
 
 // Shareable = a real device (not a root hub or interface), not a hub, not a network adapter,
 // not a drive the running system lives on, and not a device that is itself borrowed from another PC.
@@ -205,7 +176,7 @@ static const char *dev_name(const char *busid, char *buf, size_t n) {
 // ---------------------------------------------------------------- bind / return
 static int stub_bind(const char *busid) {
     char p[PATH_MAX], v[64];
-    if (is_system_drive(busid)) { logm("[%s] refused: holds the running system", busid); return -1; }
+    if (is_system_drive_now(busid)) { logm("[%s] refused: holds the running system", busid); return -1; }
     snprintf(v, sizeof v, "add %s", busid);
     if (write_sysfs(STUB "/match_busid", v) < 0) { logm("[%s] match_busid add failed: %s", busid, strerror(errno)); return -1; }
     snprintf(p, sizeof p, USBDEV "/%s/driver/unbind", busid);
@@ -221,7 +192,7 @@ static int stub_bind(const char *busid) {
 
 static void return_to_host(const char *busid) {
     char v[64];
-    if (is_system_drive(busid)) return;           // never re-probed: it is in use by this PC right now
+    if (is_system_drive_now(busid)) return;       // never re-probed: it is in use by this PC right now
     if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
     snprintf(v, sizeof v, "del %s", busid);
     write_sysfs(STUB "/match_busid", v);           // so a replug binds to the normal driver
@@ -257,7 +228,7 @@ static int scan_hardware(void) {
             // it is left alone entirely (root hubs only switch the one port, so they're fine).
             const char *hb = port + strlen(USBDEV "/");                           // "<hub>/<hub>:1.0/<port>"
             snprintf(hub, sizeof hub, "%.*s", (int)strcspn(hb, "/"), hb);
-            if (strncmp(hub, "usb", 3) && is_system_drive(hub)) continue;
+            if (strncmp(hub, "usb", 3) && is_system_drive_now(hub)) continue;
             snprintf(p, sizeof p, "%s/disable", port);
             FILE *df = fopen(p, "r");
             if (!df) continue;

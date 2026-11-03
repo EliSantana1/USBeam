@@ -9,7 +9,7 @@ mkdir -p build
 gcc -O2 -Wall -Werror -o build/sysdrive_test tests/sysdrive_test.c || exit 1
 T=build/sysdrive_test
 FAIL=0
-expect() {  # expect <system|not-system> <block name> <what>
+expect() {  # expect <system|in-use-unknown|not-system> <block name> <what>
     got=$($T block "$2" | awk '{print $2}')
     if [ "$got" = "$1" ]; then echo "OK: $3 ($2): $got"; else echo "FAIL: $3 ($2): $got, expected $1"; FAIL=1; fi
 }
@@ -61,13 +61,35 @@ if command -v dmsetup >/dev/null; then
     expect system "$L" "a drive under a device-mapper device mounted under /opt"
     umount /opt/usbeam-test || { echo "FAIL: umount /opt"; exit 1; }
     # Still held by the (now unmounted) device-mapper device, by something USBeam can't name:
-    # treated as in use by the system, to be safe.
-    expect system "$L" "a drive held by something unknown (an unmounted device-mapper device)"
+    # left alone while that lasts, but not as a certain system drive.
+    expect in-use-unknown "$L" "a drive held by something unknown (an unmounted device-mapper device)"
     dmsetup remove usbeam-test || { echo "FAIL: dm cleanup"; exit 1; }
     expect not-system "$L" "the same drive after unmounting"
 else
     echo "note: dmsetup not installed; skipping the stacked test"
 fi
+
+# 5. What USBeam does with that, over time (each "check" is like USBeam looking again later).
+#    A drive locked for a moment by something unknown (as while it's being mounted) is hidden only
+#    while that lasts, never for good; a certain system drive stays protected even after unmounting.
+check() {  # check <hidden|shown> <what>
+    got=$($T check "$L" 2>/dev/null | awk '{print $2}')
+    if [ "$got" = "$1" ]; then echo "OK: $2 ($L): $got"; else echo "FAIL: $2 ($L): $got, expected $1"; FAIL=1; fi
+}
+rm -rf /tmp/usbeam-sysdrive-test
+python3 -c 'import os,sys,time; fd=os.open(sys.argv[1], os.O_RDONLY | os.O_EXCL); time.sleep(30)' "$LOOP" &
+HOLD=$!; sleep 1
+check hidden "a drive locked by something unknown, right now"
+kill "$HOLD"; wait "$HOLD" 2>/dev/null
+check shown "the same drive once the lock is gone (not remembered as a system drive)"
+mkdir -p /mnt/usbeam-test; mount "$LOOP" /mnt/usbeam-test || { echo "FAIL: mount /mnt"; exit 1; }
+check shown "the same drive, now mounted normally under /mnt"
+umount /mnt/usbeam-test
+mkdir -p /srv/usbeam-test; mount "$LOOP" /srv/usbeam-test || { echo "FAIL: mount /srv"; exit 1; }
+check hidden "a drive mounted under /srv (certain)"
+umount /srv/usbeam-test || { echo "FAIL: umount /srv"; exit 1; }
+check hidden "the same drive after unmounting it from /srv (still protected until a restart)"
+rm -rf /tmp/usbeam-sysdrive-test
 
 [ $FAIL = 0 ] && { echo "PASS: system-drive test"; exit 0; }
 echo "System-drive test FAILED"; exit 1

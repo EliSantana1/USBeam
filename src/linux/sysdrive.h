@@ -195,34 +195,99 @@ static void sysdrv_refresh(void) {
 }
 
 // 1 if the block device with this kernel name (sda, sda2, dm-0, loop0...) is a system one.
-static int sysdrv_block_is_system(const char *name) {
+// 2: certainly a system drive (holds a system mount point, swap, a system filesystem's member...).
+// 1: locked by something USBeam can't name (not an ordinary mount it knows of): left alone while
+//    that lasts, but not for good (a drive that is being mounted is locked for a moment too).
+// 0: not a system drive.
+static int sysdrv_block_state(const char *name) {
     char bp[PATH_MAX]; dev_t d;
     snprintf(bp, sizeof bp, "/sys/class/block/%s", name);
     if (!sysdrv_read_devnum(bp, &d)) return 0;
     sysdrv_refresh();
-    if (sysdrv_has(g_sysdrv_sys, g_sysdrv_nsys, d)) return 1;
-    // Claimed by something, but not by an ordinary mount we know of: treat it as the system's.
+    if (sysdrv_has(g_sysdrv_sys, g_sysdrv_nsys, d)) return 2;
     char dev[PATH_MAX]; snprintf(dev, sizeof dev, "/dev/%s", name);
     int fd = open(dev, O_RDONLY | O_EXCL | O_NONBLOCK | O_CLOEXEC);
     if (fd >= 0) { close(fd); return 0; }
-    return errno == EBUSY && !sysdrv_has(g_sysdrv_ord, g_sysdrv_nord, d);
+    if (errno != EBUSY) return 0;
+    // Locked. The mount list may have changed since it was read (a mount finishing right now):
+    // read it again before deciding.
+    g_sysdrv_at = -1; sysdrv_refresh();
+    if (sysdrv_has(g_sysdrv_sys, g_sysdrv_nsys, d)) return 2;
+    return sysdrv_has(g_sysdrv_ord, g_sysdrv_nord, d) ? 0 : 1;
 }
 
-// 1 if any disk or partition behind the USB device "busid" (e.g. 2-3) is a system one.
-static int sysdrv_usb_is_system(const char *busid) {
+// The highest state (see sysdrv_block_state) of any disk or partition behind the USB device "busid".
+static int sysdrv_usb_state(const char *busid) {
     char needle[48]; snprintf(needle, sizeof needle, "/%s/", busid);
-    int hit = 0;
+    int st = 0;
     DIR *d = opendir("/sys/class/block");
     struct dirent *e;
-    while (!hit && d && (e = readdir(d))) {
+    while (st < 2 && d && (e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
         char link[PATH_MAX], real[PATH_MAX];
         snprintf(link, sizeof link, "/sys/class/block/%s", e->d_name);
         if (!realpath(link, real) || !strstr(real, needle)) continue;
-        if (sysdrv_block_is_system(e->d_name)) hit = 1;
+        int b = sysdrv_block_state(e->d_name);
+        if (b > st) st = b;
     }
     if (d) closedir(d);
-    return hit;
+    return st;
+}
+
+// ---------------------------------------------------------------- what USBeam does with that
+// A drive the running system lives on is left completely alone: not listed, not shared, never
+// unbound, reset or re-probed, whatever is asked.
+//  - Certain (state 2): protected until the PC restarts, even if something on it is unmounted for a
+//    moment. Recorded in SYSDRV_FILE (in /run, which starts empty after every restart).
+//  - Locked by something USBeam can't name (state 1): left alone while that lasts, checked again
+//    every 10 s, never recorded. (A drive being mounted is locked for a moment too: it must not
+//    stay hidden.)
+// `fresh`: check again now rather than trust the last 10 s (anything about to act on a device).
+// The includer provides logm().
+#ifndef SYSDRV_FILE
+#define SYSDRV_FILE "/run/usbeam/system-drives-v2"      // (the first version also kept uncertain drives)
+#define SYSDRV_OLD_FILE "/run/usbeam/system-drives"
+#endif
+static void logm(const char *fmt, ...);
+static char g_sysdrv[64][48];
+static int g_nsysdrv, g_sysdrv_loaded;
+static struct { char name[32]; time_t at; int st; } g_sysdrv_seen[64];
+static int sysdrv_check(const char *key, const char *name, int fresh, int (*state)(const char *)) {
+    if (!g_sysdrv_loaded) {
+        g_sysdrv_loaded = 1;
+#ifdef SYSDRV_OLD_FILE
+        unlink(SYSDRV_OLD_FILE);
+#endif
+        FILE *f = fopen(SYSDRV_FILE, "r");
+        char l[64];
+        while (f && fgets(l, sizeof l, f) && g_nsysdrv < 64) { l[strcspn(l, "\r\n")] = 0; if (l[0]) snprintf(g_sysdrv[g_nsysdrv++], 48, "%.47s", l); }
+        if (f) fclose(f);
+    }
+    for (int i = 0; i < g_nsysdrv; i++) if (!strcmp(g_sysdrv[i], key)) return 1;
+    time_t now = time(NULL); int slot = -1;
+    for (int i = 0; i < 64; i++) {
+        if (!strcmp(g_sysdrv_seen[i].name, name)) {
+            if (!fresh && now - g_sysdrv_seen[i].at < 10) return g_sysdrv_seen[i].st != 0;
+            slot = i; break;
+        }
+        if (slot < 0 && (!g_sysdrv_seen[i].name[0] || now - g_sysdrv_seen[i].at > 60)) slot = i;
+    }
+    int st = state(name), before = -1;
+    if (slot >= 0 && !strcmp(g_sysdrv_seen[slot].name, name)) before = g_sysdrv_seen[slot].st;
+    if (st == 2) {
+        if (slot >= 0) g_sysdrv_seen[slot].name[0] = 0;
+        if (g_nsysdrv < 64) snprintf(g_sysdrv[g_nsysdrv++], 48, "%s", key);
+        char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", SYSDRV_FILE);
+        char *sl = strrchr(dir, '/'); if (sl) { *sl = 0; mkdir(dir, 0755); }
+        FILE *f = fopen(SYSDRV_FILE, "a");
+        if (f) { fprintf(f, "%s\n", key); fclose(f); }
+        logm("[%s] holds the running system: never listed or touched by USBeam", name);
+        return 1;
+    }
+    if (st == 1 && before != 1) logm("[%s] a drive on it is in use by something USBeam can't identify: left alone while that lasts", name);
+    if (st == 0 && before == 1) logm("[%s] no longer in use by anything unknown: shown again", name);
+    if (slot >= 0) { snprintf(g_sysdrv_seen[slot].name, 32, "%s", name); g_sysdrv_seen[slot].at = now; g_sysdrv_seen[slot].st = st; }
+    return st != 0;
 }
 
 #endif
