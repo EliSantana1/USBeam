@@ -806,10 +806,18 @@ window.addEventListener('resize', closeGive);
 document.addEventListener('scroll', closeGive, true);
 // A paired PC gave this PC a device: a small notice with Give back.
 let lastNotices = '';
+const noticeSeen = {};
 function renderNotices(s) {
-  const ns = s.notices || [];
-  const names = {};
-  (s.pcs || []).forEach(pc => (pc.devices || []).forEach(d => { names[pc.id + '|' + d.busid] = d.name; }));
+  const names = {}, states = {}, now = Date.now();
+  (s.pcs || []).forEach(pc => (pc.devices || []).forEach(d => { names[pc.id + '|' + d.busid] = d.name; states[pc.id + '|' + d.busid] = d.state; }));
+  // A notice goes away by itself once the device isn't used here anymore (given back, released, or it couldn't connect).
+  const ns = (s.notices || []).filter(n => {
+    const k = n.pc + '|' + n.busid, st = states[k];
+    noticeSeen[n.id] = noticeSeen[n.id] || now;
+    const gone = st !== undefined && st !== 'mine' && st !== 'connecting' && now - noticeSeen[n.id] > 15000;
+    if (gone) post({ op: 'notice_ok', value: String(n.id) }).catch(() => {});
+    return !gone;
+  });
   const key = JSON.stringify([ns, ns.map(n => names[n.pc + '|' + n.busid] || '')]);
   if (key === lastNotices) return;
   lastNotices = key;

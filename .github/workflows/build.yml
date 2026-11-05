@@ -122,7 +122,7 @@ jobs:
         run: |
           for a in x86_64 aarch64; do
             "$a-w64-mingw32-gcc" -O2 -Wall -Werror -Ibuild -Wno-missing-field-initializers src/windows/usbeam_host.c \
-              -mwindows -o "build/svc-$a.exe" -lsetupapi -lwinusb -lws2_32 -lcfgmgr32 -liphlpapi -lshell32 -ladvapi32 -luser32
+              -mwindows -o "build/svc-$a.exe" -lsetupapi -lwinusb -lws2_32 -lcfgmgr32 -liphlpapi -lshell32 -ladvapi32 -luser32 -lbcrypt
           done
       - name: Shell scripts
         run: shellcheck -S warning packaging/appimage/setup.sh packaging/appimage/build.sh tests/*.sh
