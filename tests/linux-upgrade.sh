@@ -82,6 +82,9 @@ wait_for "$NEWVER didn't install" 180 installed "$NEWVER"
 wait_for "the app didn't start after the update" 60 one_app
 check_clean
 
+# Pairing is a one-time thing: a paired PC saved now must still be known after the updates below.
+sudo sh -c 'umask 077; printf "pair\tupgrade-test-pc\t%s\t1700000000\tUpgrade Test PC\n" 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /var/lib/usbeam/pairing'
+
 for n in 1 2; do
     say "3.$n. Update again from inside the running app (same code path as its Update button)"
     before=$(apps)
@@ -91,6 +94,11 @@ for n in 1 2; do
     wait_for "the app didn't start again after the update" 120 one_app
     check_clean
 done
+sudo grep -q "upgrade-test-pc" /var/lib/usbeam/pairing 2>/dev/null || fail "a paired PC was lost in an update"
+[ "$(sudo stat -c %a /var/lib/usbeam/pairing 2>/dev/null)" = 600 ] || fail "the pairing file isn't private (root only)"
+tok=$(sudo cat /run/usbeam/ui-token 2>/dev/null)
+python3 -c "import sys, urllib.request; r = urllib.request.Request('http://127.0.0.1:3242/api/state', headers={'X-USBeam-Token': sys.argv[1]}); print(urllib.request.urlopen(r, timeout=10).read().decode())" "$tok" 2>/dev/null \
+    | grep -q '"Upgrade Test PC"' || fail "the updated USBeam doesn't list the paired PC"
 
 say "4. Start the app four more times (three at once): still one copy"
 for _ in 1 2 3; do start /opt/usbeam/USBeam.AppImage; done

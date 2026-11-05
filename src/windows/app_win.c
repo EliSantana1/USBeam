@@ -83,6 +83,54 @@ static void plat_tune(void) {}
 
 #include "../common/client.h"
 
+// ---------------------------------------------------------------- pairing (pair.h)
+static CRITICAL_SECTION g_pr_cs;
+static void pr_lock(void) { EnterCriticalSection(&g_pr_cs); }
+static void pr_unlock(void) { LeaveCriticalSection(&g_pr_cs); }
+static void plat_random(void *buf, size_t n) {
+    if (BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) abort();   // never go on without real randomness
+}
+static void plat_sock_timeout(plat_sock s, int ms) {
+    DWORD t = (DWORD)ms;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&t, sizeof t);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char *)&t, sizeof t);
+}
+// Paired PCs and their keys, next to the settings file: readable by SYSTEM and administrators only.
+// Kept by updates; removed by Reset and Uninstall.
+static void pair_path(char *out, size_t n) {
+    snprintf(out, n, "%s", g_cfg_path);
+    char *b = strrchr(out, '\\');
+    if (b) snprintf(b + 1, n - (size_t)(b + 1 - out), "pairing");
+}
+static int plat_secret_write(const char *data, size_t n) {
+    char path[MAX_PATH], tmp[MAX_PATH + 8];
+    pair_path(path, sizeof path);
+    snprintf(tmp, sizeof tmp, "%s.new", path);
+    DeleteFileA(tmp);              // an existing file would keep its old permissions
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, FALSE };
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA("D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL)) return -1;
+    HANDLE h = CreateFileA(tmp, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    LocalFree(sa.lpSecurityDescriptor);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    DWORD w = 0;
+    BOOL ok = n == 0 || (WriteFile(h, data, (DWORD)n, &w, NULL) && w == (DWORD)n);
+    ok = ok && FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok) { DeleteFileA(tmp); return -1; }
+    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { DeleteFileA(tmp); return -1; }
+    return 0;
+}
+static int plat_secret_read(char *buf, size_t max) {
+    char path[MAX_PATH];
+    pair_path(path, sizeof path);
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t got = fread(buf, 1, max, f);
+    fclose(f);
+    return (int)got;
+}
+#include "../common/pair.h"
+
 // ---------------------------------------------------------------- which networks USBeam may be used on
 static void nets_lock(void) { EnterCriticalSection(&g_nets_cs); }
 static void nets_unlock(void) { LeaveCriticalSection(&g_nets_cs); }
@@ -302,6 +350,7 @@ static void handle_info(SOCKET s) {
     sb_add(&j, "{\"name\":", 8); sb_jstr(&j, g_name);
     sb_add(&j, ",\"id\":", 6); sb_jstr(&j, g_id);
     sb_add(&j, ",\"hello\":true", 13);           // this version understands OP_REQ_HELLO
+    pair_info_json(&j);
     sb_add(&j, ",\"devices\":[", 12);
     int first = 1;
     EnterCriticalSection(&g_devs_cs);
@@ -890,6 +939,7 @@ static int engine_run(void) {
     InitializeCriticalSection(&g_cl_cs);
     InitializeCriticalSection(&g_nets_cs);
     InitializeCriticalSection(&g_save_cs);
+    InitializeCriticalSection(&g_pr_cs);
     g_quit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     wchar_t pd[MAX_PATH];
@@ -931,6 +981,7 @@ static int engine_run(void) {
     }
     load_config();
     if (!g_id[0]) { make_random_id(g_id); save_config(); }
+    pair_load();
     refresh_devices();
     for (int i = 0; i < MAX_DEVS; i++) {     // safety net
         Dev *d = &g_devs[i];

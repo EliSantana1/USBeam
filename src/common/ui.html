@@ -120,6 +120,34 @@ h2.sub { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 
 .netpick > span:first-child { display: none; }
 .info { width: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; }
 .menu .auto { white-space: normal; }
+.toasts { position: fixed; right: 12px; bottom: 12px; z-index: 40; display: flex; flex-direction: column; gap: 8px; width: min(320px, calc(100vw - 24px)); }
+.toast { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); padding: 12px 14px; }
+.toast b { display: block; font-weight: 600; margin-bottom: 4px; }
+.toast .small { font-size: 11px; color: var(--muted); }
+.toast .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+.digits { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+.digits input { width: 40px; height: 46px; text-align: center; font-size: 20px; font-weight: 600; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 0; }
+.digits input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+.digits .gap { width: 6px; }
+.bigcode { font-size: 36px; font-weight: 700; letter-spacing: 6px; text-align: center; margin: 6px 0; font-variant-numeric: tabular-nums; }
+.warnbox { font-size: 11px; color: var(--warn); background: var(--chip); border-radius: 8px; padding: 8px 10px; margin: 8px 0 0; }
+.pairpc { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; }
+.pairpc .nm { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pairpc .st { font-size: 11px; color: var(--muted); }
+.perr { color: var(--bad); font-size: 12px; min-height: 16px; margin-top: 4px; }
+.givemenu { position: fixed; z-index: 60; min-width: 210px; max-width: calc(100vw - 24px); padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.25); }
+.givemenu .glbl { font-size: 11px; font-weight: 600; color: var(--muted); padding: 6px 10px 4px; }
+.givemenu button { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 8px 10px; font-size: 12px; cursor: pointer; color: var(--text); }
+.givemenu button:hover:not(:disabled), .givemenu button:focus-visible { background: var(--chip); outline: none; }
+.givemenu button:disabled { color: var(--muted); cursor: default; }
+.givemenu .sep { border-top: 1px solid var(--line2); margin: 4px 0; }
+.givemenu .link { color: var(--accent); font-weight: 600; }
+.givemenu .on { font-size: 11px; color: var(--ok); }
+.givemenu .none { font-size: 11px; color: var(--muted); padding: 4px 10px 6px; }
+.paired { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
+.paired .nm { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.paired .when { display: block; font-size: 11px; color: var(--muted); }
+.btn.dangertext { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -149,6 +177,11 @@ h2.sub { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 
     </div>
     <div class="sec"><div class="lbl">Add a PC by address</div>
       <div class="line"><label for="addr" class="sr">PC address</label><input type="text" id="addr" placeholder="for example 192.168.0.20" onkeydown="if(event.key==='Enter')addHost()"><button class="btn" onclick="addHost()">Add PC</button></div></div>
+    <div class="sec"><div class="lbl">Paired PCs</div>
+      <div id="pairedlist"></div>
+      <div class="line" style="margin-top:6px"><button class="btn primary" onclick="openPairing()">Pair a PC</button></div>
+      <label class="auto" style="min-height:0;margin-top:10px"><input type="checkbox" id="pairedonlychk" onchange="act({op:'set_pairedonly', on:this.checked})">Only paired PCs can use my devices</label>
+      <div class="small">When off, any PC on an allowed network can use this PC's shared devices. Only paired PCs can ever give you a device.</div></div>
     <div class="sec"><div class="lbl">This PC's name</div>
       <div class="line"><input type="text" id="pcnamein" maxlength="40" aria-label="This PC's name" onkeydown="if(event.key==='Enter')saveName()"><button class="btn" onclick="saveName()">Save</button></div>
       <div class="small" id="pcnamehint"></div></div>
@@ -178,6 +211,7 @@ h2.sub { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 
   </div>
 </header>
 <div id="modalbg" role="presentation"><div id="modal" role="dialog" aria-modal="true"></div></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <main>
   <div class="wrap">
     <div id="banner" role="alert"></div>
@@ -250,6 +284,7 @@ document.addEventListener('click', e => {
   if (!b || b.tagName === 'INPUT') return;
   const a = JSON.parse(b.dataset.act);
   if (b.dataset.pre === 'kick') return confirmKick(a);
+  if (b.dataset.pre === 'unpair') return confirmUnpair(a);
   if (b.dataset.pre === 'input' && !(S.prefs && S.prefs.inputwarned)) return inputWarning(a);
   act(a);
 });
@@ -281,6 +316,7 @@ function showSecurity() {
   toggleMenu();
   modal(`<h3>About network security</h3>
     <p>USBeam only works on networks you allow: on Windows, networks marked Private; on Linux, networks you allowed; and ZeroTier and Tailscale, which are always on.</p>
+    <p>Pairing (gear menu → Pair a PC) makes two PCs trust each other with a one-time 6-digit code. Paired PCs can give each other devices, and with "Only paired PCs can use my devices" other PCs can't connect this PC's devices at all. Pairing is kept through updates.</p>
     <p>Device data travels between PCs using USB/IP, the standard USBeam is built on. It is not encrypted by USBeam itself. On your own home network that's normally fine. ZeroTier and Tailscale encrypt everything they carry, so when you're away from home, connecting over them keeps device data private.</p>
     <div class="acts"><button class="btn primary" onclick="closeModal()">Close</button></div>`);
 }
@@ -308,6 +344,7 @@ function remoteRow(pc, d) {
   let btn = '<span class="noact">—</span>';
   const info = { _pc: pc.name, _dev: d.name || 'USB device', _peer: d.peer || 'another PC' };
   if (['mine', 'connecting', 'waiting'].includes(d.state) || (d.state === 'countdown' && d.auto)) btn = `<button class="btn" data-act="${attr(Object.assign({ op: 'release' }, key))}">Release</button>`;
+  else if (d.state === 'available' && pc.paired_only && !pc.paired) btn = `<button class="btn primary" disabled title="${esc(pc.name)} lets only paired PCs use its devices">Use</button>`;
   else if (d.state === 'available') btn = `<button class="btn primary" data-pre="${d.input ? 'input' : ''}" data-act="${attr(Object.assign({ op: 'use' }, key, info))}">Use</button>`;
   else if (d.state === 'busy') btn = `<button class="btn" data-pre="kick" data-act="${attr(Object.assign({ op: 'kick' }, key, info))}" title="Release it from the PC using it">Release</button>`;
   const locked = (d.state === 'busy' || d.state === 'drive_busy') && !d.auto;   // only the PC using it decides (unticking stays possible)
@@ -326,10 +363,11 @@ function renderPcs(s) {
     <div class="acts"><button class="btn primary" onclick="confirmRestartPc()">Restart now</button></div></div>`;
   if (!pcs.length) html += `<div class="empty">No other PCs found${s.net === 'auto' ? '' : ' on this network'} yet. They appear here automatically when USBeam runs on them, or add one by address below.</div>`;
   for (const pc of pcs) {
-    html += `<section class="box"><div class="boxhead">${PCICON}<span class="name">${esc(pc.name)}</span>
+    html += `<section class="box"><div class="boxhead">${PCICON}<span class="name">${esc(pc.name)}</span>${pc.paired ? '<span class="pill accent">Paired</span>' : ''}
       <span class="status ${pc.online ? 'on' : 'off'}">${pc.online ? 'Online' : 'Offline'}</span><div class="spacer"></div>
       <span class="via">${esc(pc.via)}</span>${pc.online ? '' : `<button class="btn" style="min-width:0" data-act="${attr({ op: 'forget_pc', pc: pc.id })}" title="Remove this PC from the list. It comes back automatically if it shows up again.">Forget</button>`}</div>`;
     if (!pc.devices.length) html += `<div class="row"><span class="dsub">${pc.online ? 'No shared devices.' : 'Not reachable right now.'}</span></div>`;
+    if (pc.paired_only && !pc.paired && pc.devices.length) html += `<div class="row"><span class="dsub">${esc(pc.name)} lets only paired PCs use its devices. To use them, pair the two PCs: gear menu → Pair a PC.</span></div>`;
     for (const d of pc.devices) html += remoteRow(pc, d);
     html += '</section>';
   }
@@ -420,10 +458,11 @@ function renderLocal(all) {
     }[d.state] || [d.state, '', null, null, ''];
     let label = M[0];
     const btn = (M[2] && !d.fixed) ? `<button class="btn ${M[4]}" style="min-width:90px" data-act="${attr(Object.assign({ op: M[3] }, id))}">${esc(M[2])}</button>` : '<span class="noact" style="min-width:90px">—</span>';
+    const give = d.state === 'available' && !d.fixed ? `<button class="btn primary" style="min-width:0;display:inline-flex;align-items:center;gap:6px" aria-haspopup="true" data-give="${attr({ busid: d.id, name: d.name })}">Give to <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg></button>` : '';
     const sub = [d.vid + ':' + d.pid, d.id, d.note].filter(Boolean).join(' · ');
     return `<div class="row"><div class="dicon">${ICON}</div>
       <div class="dinfo"><div class="dname">${esc(d.name)}</div><div class="dsub">${esc(sub)}</div></div>
-      <span class="pill ${M[1]}" title="${esc(label)}">${esc(label)}</span>${btn}</div>`;
+      <span class="pill ${M[1]}" title="${esc(label)}">${esc(label)}</span>${give}${btn}</div>`;
   }).join('') + tail;
 }
 
@@ -580,7 +619,10 @@ async function checkUpdates() {
   } catch (e) { updStatus("Couldn't check for updates. Is this PC online?"); }
 }
 function modal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modalbg').style.display = 'flex'; }
-function closeModal() { document.getElementById('modalbg').style.display = 'none'; }
+function closeModal() {
+  document.getElementById('modalbg').style.display = 'none';
+  if (pairUI) { pairUI = null; post({ op: 'pair_close' }).catch(() => {}); }
+}
 function confirmReset() {
   toggleMenu();
   modal(`<h3>Reset USBeam?</h3>
@@ -604,6 +646,180 @@ function confirmUninstall() {
     <p>USBeam stops, lets go of devices this PC uses from other PCs and returns shared devices to this PC. Then it removes its background service, firewall rules, settings, start at sign-in and its program files.</p>
     <p>${how}</p>
     <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn danger" onclick="closeModal();banner('Uninstalling USBeam…');appLink('uninstall')">Uninstall</button></div>`);
+}
+
+// ---------------------------------------------------------------- pairing
+// "Pair a PC": open it on both PCs. On one of them, pick the other PC; it shows a 6-digit code to type here.
+let pairUI = null;          // the pairing window is open: { key, entering }
+async function postJ(body) {
+  try {
+    const r = await fetch('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-USBeam-Token': token }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    return r.ok && !j.error ? { ok: true } : { ok: false, error: j.error || 'Something went wrong (' + r.status + ').' };
+  } catch (e) { return { ok: false, error: 'USBeam is not responding.' }; }
+}
+function mmss(n) { n = Math.max(0, n | 0); return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0'); }
+async function openPairing() {
+  const m = document.getElementById('menu'); if (!m.hidden) toggleMenu();
+  pairUI = { key: '' };
+  await postJ({ op: 'pair_open' });
+  lastPcs = ''; refresh();
+}
+function pairErr(t) { const e = document.getElementById('pairerr'); if (e) e.textContent = t || ''; }
+async function pairWith(id) {
+  pairErr('');
+  const r = await postJ({ op: 'pair_with', pc: id });
+  if (!r.ok) pairErr(r.error);
+  refresh();
+}
+function pairDigits() { return [...document.querySelectorAll('#paircode input')].map(i => i.value).join(''); }
+async function pairSubmit() {
+  const code = pairDigits();
+  if (!/^\d{6}$/.test(code)) { pairErr('Type all 6 digits.'); return; }
+  const b = document.getElementById('pairgo'); if (b) b.disabled = true;
+  const r = await postJ({ op: 'pair_code', value: code });
+  if (!r.ok) {
+    pairErr(r.error);
+    document.querySelectorAll('#paircode input').forEach(i => { i.value = ''; });
+    const f = document.querySelector('#paircode input'); if (f) f.focus();
+  }
+  if (b) b.disabled = false;
+  refresh();
+}
+function pairRestart() { pairUI = { key: '' }; postJ({ op: 'pair_open' }).then(refresh); }
+// The six code boxes: typing moves on, Backspace moves back, pasting fills them all.
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (!t.closest || !t.closest('#paircode')) return;
+  t.value = t.value.replace(/\D/g, '').slice(-1);
+  if (t.value && t.nextElementSibling) { let n = t.nextElementSibling; if (n.classList.contains('gap')) n = n.nextElementSibling; if (n) n.focus(); }
+  const go = document.getElementById('pairgo'); if (go) go.disabled = pairDigits().length !== 6;
+});
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if (!t.closest || !t.closest('#paircode')) return;
+  if (e.key === 'Backspace' && !t.value) { let p = t.previousElementSibling; if (p && p.classList.contains('gap')) p = p.previousElementSibling; if (p) { p.value = ''; p.focus(); } e.preventDefault(); }
+  if (e.key === 'Enter') pairSubmit();
+});
+document.addEventListener('paste', e => {
+  if (!e.target.closest || !e.target.closest('#paircode')) return;
+  const d = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 6);
+  if (!d) return;
+  e.preventDefault();
+  const ins = [...document.querySelectorAll('#paircode input')];
+  ins.forEach((i, k) => { i.value = d[k] || ''; });
+  (ins[Math.min(d.length, 5)] || ins[0]).focus();
+  const go = document.getElementById('pairgo'); if (go) go.disabled = d.length !== 6;
+});
+function renderPairing(s) {
+  if (!pairUI) return;
+  const p = s.pairing || {};
+  let stage = p.role === 'b' ? 'b' : p.role === 'a' ? 'a' : p.msg ? 'done' : p.open ? 'list' : 'expired';
+  const cands = (s.pcs || []).filter(pc => pc.online && pc.pair_cap);
+  const key = JSON.stringify([stage, p.peer, p.code, p.msg, p.ok, stage === 'list' ? cands.map(c => [c.id, c.name, c.pair_open, c.paired]) : 0]);
+  const left = document.getElementById('pairleft');
+  if (left) left.textContent = mmss(p.left);
+  const tl = document.getElementById('pairtries');
+  if (tl) tl.textContent = (p.tries_left === 1 ? '1 try' : p.tries_left + ' tries') + ' left';
+  if (key === pairUI.key && document.getElementById('modalbg').style.display === 'flex') return;
+  pairUI.key = key;
+  const timer = `<p class="small" style="margin:8px 0 0">This PC can be paired for <span id="pairleft">${mmss(p.left)}</span>.</p>`;
+  if (stage === 'b') {
+    modal(`<h3>${esc(p.peer)} wants to pair with this PC</h3>
+      <p>Type this code on ${esc(p.peer)}:</p>
+      <div class="bigcode" aria-label="Pairing code">${esc(p.code.slice(0, 3))} ${esc(p.code.slice(3))}</div>
+      <div class="warnbox">Only pair PCs you own. A paired PC can give devices to this PC without asking.</div>${timer}
+      <div class="acts"><button class="btn" onclick="closeModal()">Don't pair</button></div>`);
+  } else if (stage === 'a') {
+    modal(`<h3>Pair with ${esc(p.peer)}</h3>
+      <p>Type the code shown on ${esc(p.peer)}:</p>
+      <div class="digits" id="paircode">${[0, 1, 2].map(k => `<input inputmode="numeric" autocomplete="one-time-code" maxlength="1" aria-label="Digit ${k + 1}">`).join('')}<span class="gap"></span>${[3, 4, 5].map(k => `<input inputmode="numeric" maxlength="1" aria-label="Digit ${k + 1}">`).join('')}</div>
+      <p class="small" style="margin:0"><span id="pairtries">${p.tries_left === 1 ? '1 try' : p.tries_left + ' tries'} left</span> · expires in <span id="pairleft">${mmss(p.left)}</span></p>
+      <div class="perr" id="pairerr" role="alert"></div>
+      <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" id="pairgo" disabled onclick="pairSubmit()">Pair</button></div>`);
+    const f = document.querySelector('#paircode input'); if (f) f.focus();
+  } else if (stage === 'done') {
+    modal(`<h3>${p.ok ? 'Paired' : 'Not paired'}</h3>
+      <p>${esc(p.msg)}</p>${p.ok ? '<p>You can now give devices between the two PCs with Give to, in This PC\'s Devices. This pairing is kept through updates.</p>' : ''}
+      <div class="acts">${p.ok ? '' : '<button class="btn" onclick="pairRestart()">Start again</button>'}<button class="btn primary" onclick="closeModal()">Close</button></div>`);
+  } else if (stage === 'list') {
+    const rows = cands.map(c => `<div class="pairpc">${PCICON}<span class="nm">${esc(c.name)}${c.paired ? ' <span class="pill accent">Paired</span>' : ''}</span>
+      ${c.pair_open ? `<button class="btn primary" onclick="pairWith(${esc(JSON.stringify(c.id))})">Pair</button>` : '<span class="st">Open Pair a PC on it too</span>'}</div>`).join('');
+    modal(`<h3>Pair a PC</h3>
+      <p>Open Pair a PC on the other PC too. Then pick it here, and type the code it shows.</p>
+      ${rows || '<div class="empty" style="padding:12px">No other PCs with an up-to-date USBeam found yet.</div>'}
+      <div class="perr" id="pairerr" role="alert"></div>${timer}
+      <div class="acts"><button class="btn" onclick="closeModal()">Close</button></div>`);
+  } else {
+    modal(`<h3>Pair a PC</h3><p>Pairing time ran out.</p>
+      <div class="acts"><button class="btn" onclick="closeModal()">Close</button><button class="btn primary" onclick="pairRestart()">Start again</button></div>`);
+  }
+}
+let lastPaired = '';
+function renderPaired(s) {
+  const online = {}; (s.pcs || []).forEach(pc => { online[pc.id] = pc.online; });
+  const key = JSON.stringify([s.paired, s.paired_only, online]);
+  if (key === lastPaired) return;
+  lastPaired = key;
+  document.getElementById('pairedonlychk').checked = !!s.paired_only;
+  const list = s.paired || [];
+  document.getElementById('pairedlist').innerHTML = list.length ? list.map(p => {
+    const when = p.when ? new Date(p.when * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+    return `<div class="paired"><span class="nm">${esc(p.name)}<span class="when">Paired ${esc(when)} · ${online[p.id] ? 'online' : 'offline'}</span></span>
+      <button class="btn dangertext" style="min-width:0" data-pre="unpair" data-act="${attr({ op: 'unpair', pc: p.id, _pc: p.name })}">Unpair</button></div>`;
+  }).join('') : '<div class="small" style="margin:0 0 4px">No paired PCs yet.</div>';
+}
+function confirmUnpair(a) {
+  pendingAct = a;
+  modal(`<h3>Unpair ${esc(a._pc)}?</h3>
+    <p>The two PCs stop trusting each other: they can no longer give each other devices${S.paired_only ? `, and ${esc(a._pc)} can't use this PC's devices` : ''}. ${esc(a._pc)} forgets this PC too if it's reachable now.</p>
+    <p>You can pair them again at any time.</p>
+    <div class="acts"><button class="btn" onclick="pendingAct=null;closeModal()">Cancel</button><button class="btn danger" onclick="runPending()">Unpair</button></div>`);
+}
+// Give to: a small list of paired PCs under the button.
+function closeGive() { const g = document.getElementById('givemenu'); if (g) g.remove(); }
+function openGive(btn) {
+  closeGive();
+  const d = JSON.parse(btn.dataset.give);
+  const online = {}; (S.pcs || []).forEach(pc => { online[pc.id] = pc.online; });
+  const paired = S.paired || [];
+  const el = document.createElement('div');
+  el.id = 'givemenu'; el.className = 'givemenu'; el.setAttribute('role', 'menu');
+  el.innerHTML = `<div class="glbl">Paired PCs</div>` +
+    (paired.length ? paired.map(p => online[p.id]
+      ? `<button role="menuitem" data-act="${attr({ op: 'give', pc: p.id, busid: d.busid })}">${esc(p.name)} <span class="on">● online</span></button>`
+      : `<button role="menuitem" disabled>${esc(p.name)} <span>offline</span></button>`).join('') : '<div class="none">No paired PCs yet.</div>') +
+    `<div class="sep"></div><button role="menuitem" class="link" onclick="closeGive();openPairing()">Pair a new PC…</button>`;
+  document.body.appendChild(el);
+  const r = btn.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+  el.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+  el.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + 'px';
+  const first = el.querySelector('button:not(:disabled)'); if (first) first.focus();
+}
+document.addEventListener('click', e => {
+  const g = e.target.closest('[data-give]');
+  if (g) { e.stopPropagation(); return openGive(g); }
+  if (!e.target.closest('#givemenu') || e.target.closest('button')) setTimeout(closeGive, 0);
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeGive(); });
+window.addEventListener('resize', closeGive);
+document.addEventListener('scroll', closeGive, true);
+// A paired PC gave this PC a device: a small notice with Give back.
+let lastNotices = '';
+function renderNotices(s) {
+  const ns = s.notices || [];
+  const names = {};
+  (s.pcs || []).forEach(pc => (pc.devices || []).forEach(d => { names[pc.id + '|' + d.busid] = d.name; }));
+  const key = JSON.stringify([ns, ns.map(n => names[n.pc + '|' + n.busid] || '')]);
+  if (key === lastNotices) return;
+  lastNotices = key;
+  document.getElementById('toasts').innerHTML = ns.map(n => {
+    const dev = names[n.pc + '|' + n.busid] || 'a device';
+    return `<div class="toast" role="status"><b>${esc(n.from)} gave you ${esc(dev)}</b>
+      <div class="small">It came from a paired PC, so no approval was needed.</div>
+      <div class="acts"><button class="btn" onclick="act({op:'release', pc:${esc(JSON.stringify(n.pc))}, busid:${esc(JSON.stringify(n.busid))}}).then(()=>act({op:'notice_ok', value:'${n.id}'}))">Give back</button>
+      <button class="btn primary" onclick="act({op:'notice_ok', value:'${n.id}'})">OK</button></div></div>`;
+  }).join('');
 }
 
 async function refresh() {
@@ -633,6 +849,9 @@ async function refresh() {
     if (ni !== lastNetInfo) { lastNetInfo = ni; renderNetInfo(s); }
     const local = JSON.stringify(s.local);
     if (local !== lastLocal) { lastLocal = local; renderLocal(s.local || []); }
+    renderPaired(s);
+    renderNotices(s);
+    renderPairing(s);
     if (document.getElementById('banner').textContent.startsWith('USBeam is not responding')) banner('');
   } catch (e) { banner('USBeam is not responding. It may have been closed.'); }
 }

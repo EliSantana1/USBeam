@@ -38,6 +38,8 @@
 #include <devpkey.h>
 #include <winusb.h>
 #include <winioctl.h>
+#include <bcrypt.h>
+#include <sddl.h>
 #include "../common/devpolicy.h"
 // From usbioctl.h (not included: its names clash with winusb.h)
 #define IOCTL_USB_HUB_CYCLE_PORT CTL_CODE(FILE_DEVICE_UNKNOWN, 273, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -1024,6 +1026,9 @@ static int g_hold_secs;            // (app_win.c)
 static void peer_label(const char *ip, char *out, size_t n, int cl_held);
 static void handle_info(SOCKET s);
 static void handle_hello(SOCKET s, const char *peer, const uint8_t *op);
+static int pair_server(SOCKET s, const char *peer, uint16_t code, const uint8_t *op);   // pair.h
+static int pair_import_ok(const char *ip, const char *busid);
+static int pair_kick_ok(const char *ip);
 typedef struct { SOCKET s; char peer[64]; } Conn;
 
 static Dev *find_shared(const char *busid) {
@@ -1043,6 +1048,7 @@ static DWORD WINAPI conn_main(LPVOID arg) {
 
     if (code == OP_REQ_INFO) { handle_info(s); goto done; }
     if (code == OP_REQ_HELLO) { handle_hello(s, c->peer, op); goto done; }
+    if (pair_server(s, c->peer, code, op)) goto done;
     if (code == OP_REQ_KICK) {      // another PC asks to release a device from whichever PC is using it
         uint32_t len = get32(op + 4);
         char busid[32] = {0};
@@ -1050,6 +1056,11 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         put16(r, USBIP_VERSION); put16(r + 2, 0x0FE3);
         DWORD to = 2000; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof to);
         if (len == 0 || len > 31 || !recv_all(s, busid, (int)len)) goto done;
+        if (!pair_kick_ok(c->peer)) {           // "Only paired PCs can use my devices"
+            put32(r + 4, 2); send_all(s, r, 8);
+            say("[%s] %s asked to release it, but this PC lets only paired PCs do that", busid, c->peer);
+            goto done;
+        }
         EnterCriticalSection(&g_devs_cs);
         Dev *d = NULL;
         for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use && !strcmp(g_devs[i].busid, busid)) d = &g_devs[i];
@@ -1089,6 +1100,11 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         if (!recv_all(s, busid, 32)) goto done;
         uint8_t r[8 + 312] = {0};
         put16(r, USBIP_VERSION); put16(r + 2, OP_REP_IMPORT);
+        if (!pair_import_ok(c->peer, busid)) {
+            put32(r + 4, ST_NA); send_all(s, r, 8);
+            say("[%s] %s asked for it, but this PC lets only paired PCs use its devices", busid, c->peer);
+            goto done;
+        }
         refresh_devices();
         EnterCriticalSection(&g_devs_cs);
         Dev *d = find_shared(busid);

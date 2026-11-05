@@ -58,6 +58,7 @@ typedef struct {
     long long seen_at;              // last time it answered or announced itself (wall clock)
     unsigned long long offline_since; // when it stopped answering (0 = reachable)
     int ndev; RDev dev[CL_MAXRD];
+    int pair_cap, pair_open, paired_only;   // it can pair; "Pair a PC" is open there; it lets only paired PCs use its devices
 } Remote;
 typedef struct {
     int used;
@@ -69,6 +70,7 @@ typedef struct {
     unsigned long long next_try;
     unsigned long long attached_at;   // when it was connected here (for Auto-release)
     unsigned long long ended_at;      // when its connection ended (0 = hasn't)
+    unsigned long long give_until;    // given to this PC by its own PC (Give to): connect by then, or drop it
     char name[128], vid[8], pid[8];  // last seen details (shown if the PC drops off for a while)
 } Use;
 
@@ -78,6 +80,15 @@ static int g_netpref = NET_AUTO;
 static int g_show_hidden;         // "Show hidden devices" (built-in parts of this PC in This PC's Devices)
 static int g_input_warned;        // the one-time keyboard/mouse message was acknowledged
 static int g_input_release;       // minutes after which keyboards and mice used here are released (0 = never)
+static int g_paired_only;         // "Only paired PCs can use my devices" (pair.h)
+
+// pair.h (included after this file)
+static int pair_action(const char *op, const char *body, sb_t *out, int *code);
+static void pair_json(sb_t *j);
+static int pair_is_paired(const char *id);
+static void pair_before_attach(const char *pc, const char *ip, const char *busid);
+static void pair_auth_ping(const char *pc, const char *ip);
+static void pair_reset(void);
 
 void logm(const char *fmt, ...);
 
@@ -241,7 +252,7 @@ static int rm_pick(Remote *r) {
 }
 
 // ---------------------------------------------------------------- polling another PC
-typedef struct { char id[40], name[64]; int hello; int ndev; RDev dev[CL_MAXRD]; } PollResult;
+typedef struct { char id[40], name[64]; int hello, pair_cap, pair_open, paired_only; int ndev; RDev dev[CL_MAXRD]; } PollResult;
 
 static uint16_t cl_g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 static uint32_t cl_g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
@@ -263,6 +274,9 @@ static int poll_pc(const char *ip, PollResult *out, int ms) {
         json_str(js, "name", out->name, sizeof out->name);
         json_str(js, "id", out->id, sizeof out->id);
         out->hello = json_bool(js, "hello");
+        out->pair_cap = json_bool(js, "pair");
+        out->pair_open = json_bool(js, "pair_open");
+        out->paired_only = json_bool(js, "paired_only");
         const char *p = strstr(js, "\"devices\":[");
         while (p && out->ndev < CL_MAXRD && (p = strchr(p, '{'))) {
             const char *e = strchr(p, '}');
@@ -399,6 +413,7 @@ static void client_tick(void) {
             r->via = rm_pick(r);
             if (ok && r->via >= 0 && !strcmp(r->addr[r->via].ip, ips[i])) {
                 r->ndev = pr.ndev; memcpy(r->dev, pr.dev, sizeof pr.dev);
+                r->pair_cap = pr.pair_cap; r->pair_open = pr.pair_open; r->paired_only = pr.paired_only;
                 for (int k = 0; k < r->ndev; k++) {          // remember names of devices used here
                     Use *u = use_find(r->id, r->dev[k].busid);
                     if (!u || !r->dev[k].name[0]) continue;
@@ -485,6 +500,17 @@ static void client_tick(void) {
             cl_unlock();
             continue;
         }
+        if (u.give_until && now > u.give_until) {   // given by its PC, but it never became available here
+            cl_lock();
+            if (g_use[i].used && g_use[i].port < 0 && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
+                g_use[i].used = 0;
+                fail_set(u.pc, u.busid, "It was given to this PC, but couldn't be connected.", now);
+            }
+            cl_unlock();
+            logm("[%s] given to this PC, but couldn't be connected in time", u.busid);
+            changed = 1;
+            continue;
+        }
         if (!u.want || now < u.next_try) continue;
         char ip[64] = "";
         cl_lock();
@@ -507,14 +533,26 @@ static void client_tick(void) {
             changed = 1;
             continue;
         }
+        int locked_out = r && r->paired_only && !pair_is_paired(u.pc);
         cl_unlock();
+        if (locked_out && ip[0] && listed) {      // that PC lets only paired PCs use its devices
+            cl_lock();
+            if (g_use[i].used && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
+                fail_set(u.pc, u.busid, "Its PC lets only paired PCs use its devices. Pair them in the gear menu.", now);
+                g_use[i].next_try = now + 5000;
+                if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
+            }
+            cl_unlock();
+            continue;
+        }
         if (!ip[0] || !listed) { cl_lock(); g_use[i].next_try = now + 2000; cl_unlock(); continue; }
         if (g_cl_asleep) break;
+        pair_before_attach(u.pc, ip, u.busid);    // a paired PC: let it know it's really this PC asking
         int port = plat_attach(ip, u.busid);
         cl_lock();
         if (g_use[i].used && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
             g_use[i].port = port;
-            if (port >= 0) g_use[i].attached_at = now;
+            if (port >= 0) { g_use[i].attached_at = now; g_use[i].give_until = 0; }
             snprintf(g_use[i].ip, sizeof g_use[i].ip, "%s", ip);
             if (port < 0) {
                 if (!g_use[i].autorc || !fail_get(u.pc, u.busid, now)) fail_set(u.pc, u.busid, plat_attach_error(), now);
@@ -609,6 +647,7 @@ static void prefs_reset(void) {
 
 static void client_save_lines(FILE *f) {
     fprintf(f, "net %s\n", NET_KEY[g_netpref]);
+    if (g_paired_only) fprintf(f, "pairedonly 1\n");
     if (g_custom_name[0]) fprintf(f, "pcname\t%s\n", g_custom_name);
     fprintf(f, "hold %d\ntheme %s\ntraylogin %d\nshowhidden %d\ninputwarned %d\ninputrelease %d\n",
             g_hold_secs, g_theme, g_tray_login, g_show_hidden, g_input_warned, g_input_release);
@@ -657,6 +696,7 @@ static int client_load_line(const char *line) {
         return 1;
     }
     int n;
+    if (sscanf(line, "pairedonly %d", &n) == 1) { g_paired_only = n != 0; return 1; }
     if (sscanf(line, "hold %d", &n) == 1) { if (n >= 3 && n <= 120) g_hold_secs = n; return 1; }
     if (sscanf(line, "traylogin %d", &n) == 1) { g_tray_login = n != 0; return 1; }
     if (sscanf(line, "showhidden %d", &n) == 1) { g_show_hidden = n != 0; return 1; }
@@ -715,7 +755,9 @@ static void client_json(sb_t *j) {
         first = 0;
         sb_add(j, "{\"id\":", 6); sb_jstr(j, r->id);
         sb_add(j, ",\"name\":", 8); sb_jstr(j, r->name[0] ? r->name : (r->naddr ? r->addr[0].ip : "?"));
-        sb_printf(j, ",\"online\":%s", via >= 0 ? "true" : "false");
+        sb_printf(j, ",\"online\":%s,\"paired\":%s,\"pair_cap\":%s,\"pair_open\":%s,\"paired_only\":%s", via >= 0 ? "true" : "false",
+                  pair_is_paired(r->id) ? "true" : "false", r->pair_cap && via >= 0 ? "true" : "false",
+                  r->pair_open && via >= 0 ? "true" : "false", r->paired_only ? "true" : "false");
         if (via >= 0) {
             char vt[128]; snprintf(vt, sizeof vt, "via %s · %s", NET_LABEL[r->addr[via].kind], r->addr[via].ip);
             sb_add(j, ",\"via\":", 7); sb_jstr(j, vt);
@@ -762,6 +804,7 @@ static void client_json(sb_t *j) {
     }
     cl_unlock();
     sb_add(j, "]", 1);
+    pair_json(j);
 }
 
 // Returns 1 if it handled the action (writes any error into out and sets *code).
@@ -813,6 +856,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         cl_unlock();
         if (!ip[0] || !busid[0]) { sb_printf(out, "%s", "{\"error\":\"That PC can't be reached right now.\"}"); *code = 400; return 1; }
         int st = -1;
+        pair_auth_ping(pc, ip);                 // a paired PC: needed when that PC lets only paired PCs do this
         plat_sock s = plat_connect(ip, 2000);
         if (s != PLAT_BAD_SOCK) {
             uint8_t h[8];
@@ -823,6 +867,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
             plat_close(s);
         }
         if (st < 0) { sb_printf(out, "%s", "{\"error\":\"That PC didn't answer. Is USBeam up to date there?\"}"); *code = 400; return 1; }
+        if (st == 2) { sb_printf(out, "%s", "{\"error\":\"That PC lets only paired PCs do this. Pair them in the gear menu.\"}"); *code = 400; return 1; }
         logm("[%s] asked %s to release it from the PC using it", busid, nm);
         cl_lock(); r = rm_find(pc); if (r) r->next_poll = 0; cl_unlock();
         return 1;
@@ -838,6 +883,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         g_netpref = NET_AUTO;
         prefs_reset();
         cl_unlock();
+        pair_reset();                            // forget paired PCs too
         client_save();
         return 1;
     }
@@ -907,7 +953,7 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         client_save();
         return 1;
     }
-    return 0;
+    return pair_action(op, body, out, code);
 }
 
 #endif

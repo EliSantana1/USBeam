@@ -44,6 +44,13 @@ static void peer_label(const char *ip, char *out, size_t n, int cl_held) { (void
 static void logm(const char *f, ...) { va_list a; va_start(a, f); printf("  usbeam: "); vprintf(f, a); printf("\n"); va_end(a); }
 static void client_save(void) {}
 #include "../src/common/client.h"
+static void pr_lock(void) {}
+static void pr_unlock(void) {}
+static void plat_random(void *buf, size_t n) { memset(buf, 7, n); }
+static void plat_sock_timeout(plat_sock s, int ms) { (void)s; (void)ms; }
+static int plat_secret_write(const char *data, size_t n) { (void)data; (void)n; return 0; }
+static int plat_secret_read(char *buf, size_t max) { (void)buf; (void)max; return -1; }
+#include "../src/common/pair.h"
 
 static int fails;
 static void check(int ok, const char *what) { printf("%s: %s\n", ok ? "OK" : "FAIL", what); if (!ok) fails++; }

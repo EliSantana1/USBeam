@@ -9,7 +9,7 @@
 # make webview2        -> downloads the WebView2 SDK from NuGet into build/webview2-sdk
 
 CFLAGS ?= -O2 -Wall
-WINLIBS = -lsetupapi -lwinusb -lws2_32 -lcfgmgr32 -liphlpapi -lshell32 -ladvapi32 -luser32
+WINLIBS = -lsetupapi -lwinusb -lws2_32 -lcfgmgr32 -liphlpapi -lshell32 -ladvapi32 -luser32 -lbcrypt
 WV2 = build/webview2-sdk/build/native
 
 all: linux windows-arm64 windows-x64

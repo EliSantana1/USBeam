@@ -41,6 +41,7 @@ typedef struct {
 } HostDev;
 
 static HostDev g_h[MAXH];
+static int pair_import_ok(const char *ip, const char *busid);   // pair.h
 static int g_hold_secs = 10;     // countdown before a replugged device may be taken again (gear menu)
 
 static HostDev *hdev(const char *busid, int create) {
@@ -508,6 +509,11 @@ static void handle_import(int s, const char *peer) {
     put16b(r, USBIP_VERSION); put16b(r + 2, 0x0003);
     char name[256];
     if (!offerable(busid)) { put32b(r + 4, 1); send_all(s, r, 8); logm("%s asked for %s: not available", peer, busid); return; }
+    if (!pair_import_ok(peer, busid)) {
+        put32b(r + 4, 1); send_all(s, r, 8);
+        logm("[%s] %s asked for it, but this PC lets only paired PCs use its devices", busid, peer);
+        return;
+    }
     dev_name(busid, name, sizeof name);
     if (!bound_to_stub(busid) && stub_bind(busid) < 0) { put32b(r + 4, 1); send_all(s, r, 8); return; }
     char p[PATH_MAX], v[32];

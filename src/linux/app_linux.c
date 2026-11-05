@@ -146,6 +146,54 @@ static void plat_tune(void) { tune_drives(); }
 
 #include "../common/client.h"
 
+// ---------------------------------------------------------------- pairing (pair.h)
+#include <sys/random.h>
+static pthread_mutex_t g_pr_mx = PTHREAD_MUTEX_INITIALIZER;
+static void pr_lock(void) { pthread_mutex_lock(&g_pr_mx); }
+static void pr_unlock(void) { pthread_mutex_unlock(&g_pr_mx); }
+static void plat_random(void *buf, size_t n) {
+    uint8_t *p = buf;
+    while (n) {
+        ssize_t r = getrandom(p, n, 0);
+        if (r < 0) { if (errno == EINTR) continue; abort(); }    // never go on without real randomness
+        p += r; n -= (size_t)r;
+    }
+}
+static void plat_sock_timeout(plat_sock s, int ms) {
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+// Paired PCs and their keys: readable by root only. Kept by updates; removed by Reset and Uninstall.
+static const char g_pair_file[] = "/var/lib/usbeam/pairing";
+static int plat_secret_write(const char *data, size_t n) {
+    mkdir("/var/lib/usbeam", 0755);
+    char tmp[64]; snprintf(tmp, sizeof tmp, "%s.new", g_pair_file);
+    unlink(tmp);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t w = write(fd, data + done, n - done);
+        if (w <= 0) { close(fd); unlink(tmp); return -1; }
+        done += (size_t)w;
+    }
+    if (fchmod(fd, 0600) || fsync(fd)) { close(fd); unlink(tmp); return -1; }
+    close(fd);
+    return rename(tmp, g_pair_file);
+}
+static int plat_secret_read(char *buf, size_t max) {
+    int fd = open(g_pair_file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (!fstat(fd, &st) && (st.st_mode & 077)) fchmod(fd, 0600);
+    size_t got = 0; ssize_t r;
+    while (got < max && (r = read(fd, buf + got, max - got)) > 0) got += (size_t)r;
+    close(fd);
+    return (int)got;
+}
+#include "../common/pair.h"
+
 // ---------------------------------------------------------------- which networks USBeam may be used on
 // Linux has no shared idea of "home" vs "public" networks, so USBeam asks once per network
 // (in its window) and remembers the answer. ZeroTier and Tailscale are always allowed.
@@ -359,6 +407,7 @@ static void handle_info(int s) {
     sb_add(&j, "{\"name\":", 8); sb_jstr(&j, g_name);
     sb_add(&j, ",\"id\":", 6); sb_jstr(&j, g_id);
     sb_add(&j, ",\"hello\":true", 13);           // this version understands OP_REQ_HELLO
+    pair_info_json(&j);
     sb_add(&j, ",\"devices\":[", 12);
     int first = 1;
     for (int i = 0; i < n; i++) {
@@ -394,6 +443,11 @@ static void handle_kick(int s, const char *peer, const uint8_t *op) {
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     if (len == 0 || len > 31 || recv_all(s, busid, len)) return;
     busid[len] = 0;
+    if (!pair_kick_ok(peer)) {                  // "Only paired PCs can use my devices"
+        put32b(r + 4, 2); send_all(s, r, 8);
+        logm("[%s] %s asked to release it, but this PC lets only paired PCs do that", busid, peer);
+        return;
+    }
     HostDev *h = is_system_drive(busid) ? NULL : hdev(busid, 0);
     if (!h || !h->exported) { put32b(r + 4, 1); send_all(s, r, 8); return; }
     char name[256], pl[160], by[160];
@@ -818,6 +872,7 @@ static void *host_main(void *arg) {
                     else if (code == OP_REQ_INFO) handle_info(s);
                     else if (code == OP_REQ_HELLO) handle_hello(s, peer, op);
                     else if (code == OP_REQ_KICK) handle_kick(s, peer, op);
+                    else if (pair_server(s, peer, code, op)) {}
                     else if (code == OP_REQ_IMPORT) {
                         handle_import(s, peer);
                         struct timeval z = {0, 0};      // the kernel uses this connection now: no time limits
@@ -878,6 +933,7 @@ static int cmd_app(int service) {
     FILE *bf = fopen("/proc/sys/kernel/random/boot_id", "r");     // changes on every power-on, not on sleep
     if (bf) { if (!fgets(g_boot_id, sizeof g_boot_id, bf)) g_boot_id[0] = 0; fclose(bf); g_boot_id[strcspn(g_boot_id, "\n")] = 0; }
     load_settings();
+    pair_load();
     if (!g_id[0]) { make_random_id(g_id); save_settings(); }
 
     // Safety net: return anything left bound to usbip-host.
