@@ -18,6 +18,7 @@ static void logm(const char *fmt, ...) { va_list a; va_start(a, fmt); vprintf(fm
 #include "../src/linux/stream.h"
 
 #define REPORTS 3000
+static uint64_t made_at[1 << 16];   // when the simulated mouse made report number n
 static int fails;
 static void check(int ok, const char *what) { printf("%s: %s\n", ok ? "OK" : "FAIL", what); if (!ok) fails++; }
 
@@ -62,6 +63,7 @@ static void *host_main(void *arg) {
             Out *o = &q[(qh + qn++) % 65536];
             memset(o->m, 0, 48);
             st_p32(o->m, 3); st_p32(o->m + 4, pend[0].seq); st_p32(o->m + 24, 6);
+            made_at[counter & 0xFFFF] = now;
             st_p32(o->m + 48, counter++); o->m[52] = 2; o->m[53] = 1;     // report: counter, dx 2, dy 1
             o->n = 54;
             o->at = now + net_delay(&h->seed); if (o->at < last_send) o->at = last_send;   // TCP keeps order
@@ -79,6 +81,8 @@ static void *host_main(void *arg) {
 }
 
 // ---- simulated Linux HID driver: one read at a time, a new one right after each report
+static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return x < y ? -1 : x > y; }
+static double lat_p99;
 static void run(const char *name, int use_relay, double *rate_out, double *p90_out, double *p99_out) {
     int net[2], kern[2];
     socketpair(AF_UNIX, SOCK_STREAM, 0, net);
@@ -87,7 +91,7 @@ static void run(const char *name, int use_relay, double *rate_out, double *p90_o
     int drv;
     if (use_relay) { socketpair(AF_UNIX, SOCK_STREAM, 0, kern); stream_start(net[1], kern[1], 2, "1-1"); drv = kern[0]; }
     else drv = net[1];
-    static uint64_t t[REPORTS];
+    static uint64_t t[REPORTS]; static double lat[REPORTS];
     uint32_t expect = 0; int in_order = 1, bad_data = 0;
     uint8_t sub[48] = {0}, r[48], d[6];
     st_p32(sub, 1); st_p32(sub + 12, 1); st_p32(sub + 16, 1); st_p32(sub + 24, 6); st_p32(sub + 36, 1);   // interrupt IN, ep 1, 1 ms
@@ -99,6 +103,7 @@ static void run(const char *name, int use_relay, double *rate_out, double *p90_o
         if (st_g32(r + 24) != 6 || st_recv(drv, d, 6)) { bad_data++; break; }
         t[i] = st_now();
         uint32_t c = st_g32(d);
+        lat[i] = (t[i] - made_at[(c ? c - 1 : 0) & 0xFFFF]) / 1e6;   // since the movement in it began
         if (c != expect) in_order = 0;
         expect = c + 1;
         if (d[4] != 2 || d[5] != 1) bad_data++;
@@ -109,8 +114,10 @@ static void run(const char *name, int use_relay, double *rate_out, double *p90_o
     int n = REPORTS - 1;
     for (int i = 1; i < n; i++) { double v = gaps[i]; int j = i - 1; while (j >= 0 && gaps[j] > v) { gaps[j + 1] = gaps[j]; j--; } gaps[j + 1] = v; }
     *rate_out = n / secs; *p90_out = gaps[(int)(0.9 * (n - 1))]; *p99_out = gaps[(int)(0.99 * (n - 1))];
-    printf("%s: %.0f reports/s, gap ms median %.2f p90 %.2f p99 %.2f max %.2f; in order: %s; data ok: %s\n",
-           name, *rate_out, gaps[n / 2], gaps[(int)(0.9 * (n - 1))], *p99_out, gaps[n - 1], in_order ? "yes" : "NO", bad_data ? "NO" : "yes");
+    qsort(lat, REPORTS, sizeof lat[0], cmpd);
+    lat_p99 = lat[(int)(0.99 * (REPORTS - 1))];
+    printf("%s: %.0f reports/s, gap ms median %.2f p90 %.2f p99 %.2f max %.2f; delay ms median %.1f p99 %.1f; in order: %s; data ok: %s\n",
+           name, *rate_out, gaps[n / 2], gaps[(int)(0.9 * (n - 1))], *p99_out, gaps[n - 1], lat[REPORTS / 2], lat_p99, in_order ? "yes" : "NO", bad_data ? "NO" : "yes");
     if (use_relay) check(in_order && !bad_data, "relay: every report arrives once, in order, unchanged");
     close(drv);
 }
@@ -171,7 +178,9 @@ int main(void) {
     protocol_checks();
     double r0, a0, p0, r1, a1, p1;
     run("direct (as before)", 0, &r0, &a0, &p0);
+    double l0 = lat_p99;
     run("through the relay ", 1, &r1, &a1, &p1);
+    check(lat_p99 <= l0, "relay: movement is not delayed more than before (slowest 1%; a mouse gathers movement until it is asked)");
     check(r1 >= 900, "relay: at least 900 reports per second from a 1000 Hz mouse");
     check(a1 <= 2.0, "relay: 90% of reports at most 2 ms apart (a 1000 Hz mouse plugged in directly: 1 ms)");
     check(p1 * 2 <= p0, "relay: the slowest 1% of gaps at least twice as short as before");

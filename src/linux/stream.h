@@ -156,8 +156,9 @@ static uint64_t st_deliver(Stream *st, int e) {
     st_p32(h + 24, n);
     uint8_t *data = r->data;
     p->waiting = 0; st->n_given++;
-    // Several waiting: hand them over at ~1.33x the device's rate (smooth, and the delay drains).
-    if (n) p->next_ns = p->qn ? now + p->pace_ns : 0;
+    // Several waiting: hand them over a little faster than the device makes them, so the timing
+    // stays even and the delay drains: 1.1x with a few queued, 1.7x with more.
+    if (n) p->next_ns = !p->qn ? 0 : now + (p->qn <= 4 ? p->pace_ns : p->pace_ns * 2 / 3);
     pthread_mutex_unlock(&st->mx);
     pthread_mutex_lock(&st->kern_mx);
     int bad = st_send(st->kern, h, 48) || (n && st_send(st->kern, data, n));
@@ -219,7 +220,7 @@ static void *st_up(void *arg) {
                 if (!p->on || p->len != len) {
                     p->on = 1; p->len = len;
                     uint64_t unit = st->speed >= 3 ? 125000ull : 1000000ull;     // high speed counts microframes
-                    uint64_t pace = (uint64_t)iv * unit * 3 / 4;
+                    uint64_t pace = (uint64_t)iv * unit * 9 / 10;
                     if (pace < 125000ull) pace = 125000ull;
                     if (pace > 16000000ull) pace = 16000000ull;
                     p->pace_ns = pace;
