@@ -25,8 +25,12 @@ cleanup() {
 }
 
 echo "== kernel parts"
+if ! modprobe dummy_hcd 2>/dev/null; then
+    apt-get update -q >/dev/null 2>&1
+    apt-get install -y -q "linux-modules-extra-$(uname -r)" 2>&1 | tail -3
+fi
 for m in dummy_hcd libcomposite usb_f_hid usbip-host vhci-hcd; do
-    modprobe $m 2>/dev/null || { apt-get install -y -q "linux-modules-extra-$(uname -r)" >/dev/null 2>&1; modprobe $m || fail "kernel module $m not available"; }
+    modprobe $m || fail "kernel module $m not available"
 done
 mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
 
