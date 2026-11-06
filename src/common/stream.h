@@ -38,9 +38,15 @@ static void st_cond_init(st_cond_t *c) {
 }
 static void st_cond_destroy(st_cond_t *c) { CloseHandle(c->ev); CloseHandle(c->timer); }
 static void st_wake_all(st_cond_t *c) { SetEvent(c->ev); }
+static uint64_t st_now(void);
 static void st_cond_wait_ns(st_cond_t *c, st_mutex_t *m, uint64_t ns) {   // ns 0 = until woken
     LeaveCriticalSection(m);
-    if (ns) {
+    if (ns && ns <= 2000000ull) {
+        // Under 2 ms (spacing out a burst of reports): Windows' timers are often 1-2 ms late, so
+        // wait actively. Only happens while reports are queued, for a few milliseconds at a time.
+        uint64_t until = st_now() + ns;
+        while (st_now() < until && WaitForSingleObject(c->ev, 0) != WAIT_OBJECT_0) SwitchToThread();
+    } else if (ns) {
         LARGE_INTEGER due; due.QuadPart = -(LONGLONG)(ns / 100 ? ns / 100 : 1);
         SetWaitableTimer(c->timer, &due, 0, NULL, NULL, FALSE);
         HANDLE hs[2] = { c->ev, c->timer };
