@@ -36,7 +36,7 @@ if ! modprobe dummy_hcd 2>/dev/null; then
     K=$(uname -r); V=$(echo "$K" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
     apt-get install -y -q "linux-headers-$K" >/dev/null 2>&1
     D=$(mktemp -d)
-    curl -fsSL -o "$D/dummy_hcd.c" "https://raw.githubusercontent.com/torvalds/linux/v$V/drivers/usb/gadget/udc/dummy_hcd.c" || fail "couldn't get dummy_hcd.c for $V"
+    curl -fsSL --retry 5 --retry-delay 3 -o "$D/dummy_hcd.c" "https://raw.githubusercontent.com/torvalds/linux/v$V/drivers/usb/gadget/udc/dummy_hcd.c" || fail "couldn't get dummy_hcd.c for $V"
     echo "obj-m := dummy_hcd.o" > "$D/Makefile"
     make -s -C "/lib/modules/$K/build" M="$D" modules 2>&1 | tail -5
     modprobe udc-core 2>/dev/null; modprobe libcomposite
