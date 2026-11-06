@@ -241,12 +241,13 @@ static uint64_t st_deliver(Stream *st, int e) {
     st_p32(h + 24, n);
     uint8_t *data = r->data;
     p->waiting = 0; st->n_given++;
-    // Several waiting: hand them over a little faster than the device makes them, so the timing
-    // stays even and the delay drains: 1.1x with a few queued, 1.7x with more.
+    // The next one goes no sooner than a little under the device's own pace (also after a pause, so
+    // a burst that arrives at once is spaced out), faster while more are queued so the delay
+    // drains: 1.1x the device's rate with a few queued, 1.7x with more.
     // The device's pace is learned from how often reports come in (systems describe the polling
     // interval differently); until then, from the interval the system asked for.
     uint64_t pace = p->avg_gap ? p->avg_gap * 9 / 10 : p->pace_ns;
-    if (n) p->next_ns = !p->qn ? 0 : now + (p->qn <= 4 ? pace : pace * 2 / 3);
+    if (n) p->next_ns = now + (p->qn <= 4 ? pace : pace * 2 / 3);
     st_unlock(&st->mx);
     st_lock(&st->kern_mx);
     int bad = st_send(st->kern, h, 48) || (n && st_send(st->kern, data, n));
