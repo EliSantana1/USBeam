@@ -144,11 +144,12 @@ static bool service_wanted_at_signin() {
     bool wanted = true;
     SC_HANDLE svc = OpenServiceW(scm, L"USBeam", SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS);
     if (svc) {
-        alignas(8) BYTE buf[8192]; DWORD need = 0;
-        QUERY_SERVICE_CONFIGW *qc = reinterpret_cast<QUERY_SERVICE_CONFIGW *>(buf);
+        DWORD need = 0;
+        auto *qc = static_cast<QUERY_SERVICE_CONFIGW *>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8192));
         SERVICE_STATUS st;
-        if (QueryServiceConfigW(svc, qc, sizeof buf, &need) && qc->dwStartType == SERVICE_DEMAND_START &&
+        if (qc && QueryServiceConfigW(svc, qc, 8192, &need) && qc->dwStartType == SERVICE_DEMAND_START &&
             QueryServiceStatus(svc, &st) && st.dwCurrentState == SERVICE_STOPPED) wanted = false;
+        if (qc) HeapFree(GetProcessHeap(), 0, qc);
         CloseServiceHandle(svc);
     }
     CloseServiceHandle(scm);

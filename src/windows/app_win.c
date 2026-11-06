@@ -935,19 +935,27 @@ static void write_token_file(void) {
 // "Start USBeam when this PC starts": the service starts automatically, or only when the app is
 // opened (the installer lets signed-in users start it). Applied again at every start, so an update
 // (which sets it to automatic) keeps the choice.
-static void plat_set_bootstart(int on) {
-    if (!g_svc) return;                                   // developer console run
+static DWORD WINAPI bootstart_main(LPVOID p) {
+    DWORD want = p ? SERVICE_AUTO_START : SERVICE_DEMAND_START, need = 0;
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     SC_HANDLE svc = scm ? OpenServiceW(scm, L"USBeam", SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG) : NULL;
-    DWORD want = on ? SERVICE_AUTO_START : SERVICE_DEMAND_START, need = 0;
-    BYTE buf[8192]; QUERY_SERVICE_CONFIGW *qc = (QUERY_SERVICE_CONFIGW *)buf;
-    if (!svc) logm("Could not change whether USBeam starts with this PC (error %lu)", GetLastError());
-    else if (!QueryServiceConfigW(svc, qc, sizeof buf, &need) || qc->dwStartType != want) {
+    QUERY_SERVICE_CONFIGW *qc = (QUERY_SERVICE_CONFIGW *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8192);
+    if (!svc || !qc) logm("Could not change whether USBeam starts with this PC (error %lu)", GetLastError());
+    else if (!QueryServiceConfigW(svc, qc, 8192, &need) || qc->dwStartType != want) {
         if (!ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, want, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL))
             logm("Could not change whether USBeam starts with this PC (error %lu)", GetLastError());
+        else logm(p ? "Set to start with this PC" : "Set to start only when USBeam is opened");
     }
+    if (qc) HeapFree(GetProcessHeap(), 0, qc);
     if (svc) CloseServiceHandle(svc);
     if (scm) CloseServiceHandle(scm);
+    return 0;
+}
+// On its own thread: Windows' service manager may be busy (starting this service) for a moment.
+static void plat_set_bootstart(int on) {
+    if (!g_svc) return;                                   // developer console run
+    HANDLE t = CreateThread(NULL, 0, bootstart_main, on ? (LPVOID)1 : NULL, 0, NULL);
+    if (t) CloseHandle(t);
 }
 
 static int engine_run(void) {

@@ -32,7 +32,7 @@ drives, security keys: one click to use them on another PC, one click to give th
 |:---:|:---:|
 | <img src="docs/screenshots/give-to.png" alt="Give to: send a device to a paired PC" width="420"><br>**Give to** a paired PC | <img src="docs/screenshots/pairing-code.png" alt="Pairing code shown on the other PC" width="420"><br>**Pairing:** type the code the other PC shows |
 | <img src="docs/screenshots/pair-a-pc.png" alt="Pair a PC: pick the other PC" width="420"><br>**Pair a PC:** pick the other PC | <img src="docs/screenshots/paired-pcs.png" alt="Paired PCs in the settings menu" width="420"><br>**Paired PCs** and "Only paired PCs" in settings |
-| <img src="docs/screenshots/dark-theme.png" alt="Dark theme" width="420"><br>**Dark theme** | |
+| <img src="docs/screenshots/connect-over.png" alt="Connect over: home network, ZeroTier or Tailscale" width="420"><br>**Connect over** your home network, ZeroTier or Tailscale | <img src="docs/screenshots/dark-theme.png" alt="Dark theme" width="420"><br>**Dark theme** |
 
 ## Safeguards
 
