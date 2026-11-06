@@ -25,6 +25,10 @@ cleanup() {
 }
 
 echo "== kernel parts"
+for m in dummy_hcd libcomposite usb_f_hid usbip-host vhci-hcd usbhid; do
+    modinfo -n $m >/dev/null 2>&1 && echo "have $m" || echo "missing $m"
+done
+apt-cache search --names-only "linux-(modules|headers).*$(uname -r)" 2>/dev/null | head -5
 if ! modprobe dummy_hcd 2>/dev/null; then
     apt-get update -q >/dev/null 2>&1
     apt-get install -y -q "linux-modules-extra-$(uname -r)" 2>&1 | tail -3
