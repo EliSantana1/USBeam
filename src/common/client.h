@@ -70,7 +70,7 @@ typedef struct {
     unsigned long long next_try;
     unsigned long long attached_at;   // when it was connected here (for Auto-release)
     unsigned long long ended_at;      // when its connection ended (0 = hasn't)
-    unsigned long long give_until;    // given to this PC by its own PC (Give to): connect by then, or drop it
+    unsigned long long give_until;    // given to this PC by its own PC (Give To): connect by then, or drop it
     char name[128], vid[8], pid[8];  // last seen details (shown if the PC drops off for a while)
 } Use;
 

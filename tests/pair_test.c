@@ -2,7 +2,7 @@
 // Pairing test: two USBeam PCs (two processes, the real pairing code in src/common/pair.h,
 // talking over real network connections on this PC) pair with a 6-digit code, then use what
 // pairing allows. Checks: wrong codes, the 3-tries limit, pairing only while "Pair a PC" is open,
-// easy codes never chosen, a forged key refused, Give to, "Only paired PCs", unpair,
+// easy codes never chosen, a forged key refused, Give To, "Only paired PCs", unpair,
 // and that pairings survive a restart (saved and loaded again).
 #include <stdio.h>
 #include <stdlib.h>
@@ -247,7 +247,7 @@ int main(void) {
     check(strstr(b("msg"), "Paired with PC-A") != NULL, "PC-B shows Paired with PC-A");
     check(!strcmp(b("mode"), "600"), "PC-B's saved pairing file is readable by its owner only");
 
-    printf("4. Give to, and a forged key\n");
+    printf("4. Give To, and a forged key\n");
     snprintf(body, sizeof body, "\"pc\":\"id-b\",\"busid\":\"1-3\"");
     check(act("give", body) == 200, "PC-A gives device 1-3 to PC-B");
     check(!strcmp(b("given 1-3"), "1"), "PC-B is connecting it (no prompt needed)");
@@ -271,7 +271,7 @@ int main(void) {
     printf("6. Pairings survive a restart or update\n");
     check(!strcmp(b("reload"), "1"), "PC-B still knows PC-A after loading its file again");
     snprintf(body, sizeof body, "\"pc\":\"id-b\",\"busid\":\"1-5\"");
-    check(act("give", body) == 200, "and Give to still works with the loaded key");
+    check(act("give", body) == 200, "and Give To still works with the loaded key");
 
     printf("7. Three wrong codes end the pairing\n");
     b("open"); act("pair_open", "");
@@ -304,7 +304,7 @@ int main(void) {
     check(act("unpair", body) == 200 && !pair_is_paired("id-b"), "PC-A forgets PC-B");
     check(!strcmp(b("key id-a"), "-"), "PC-B forgets PC-A too");
     snprintf(body, sizeof body, "\"pc\":\"id-b\",\"busid\":\"1-6\"");
-    check(act("give", body) == 400 && strstr(g_out, "Pair with that PC first"), "Give to needs pairing again");
+    check(act("give", body) == 400 && strstr(g_out, "Pair with that PC first"), "Give To needs pairing again");
 
     b("quit");
     waitpid(pid, NULL, 0);

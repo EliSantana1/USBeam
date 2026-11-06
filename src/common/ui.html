@@ -455,7 +455,7 @@ function renderLocal(all) {
     }[d.state] || [d.state, '', null, null, ''];
     let label = M[0];
     const btn = (M[2] && !d.fixed) ? `<button class="btn ${M[4]}" style="min-width:90px" data-act="${attr(Object.assign({ op: M[3] }, id))}">${esc(M[2])}</button>` : '<span class="noact" style="min-width:90px">—</span>';
-    const give = d.state === 'available' && !d.fixed ? `<button class="btn primary" style="min-width:0;display:inline-flex;align-items:center;gap:6px" aria-haspopup="true" data-give="${attr({ busid: d.id, name: d.name })}">Give to <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg></button>` : '';
+    const give = d.state === 'available' && !d.fixed ? `<button class="btn primary" style="min-width:0;display:inline-flex;align-items:center;gap:6px" aria-haspopup="true" data-give="${attr({ busid: d.id, name: d.name })}">Give To <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg></button>` : '';
     const sub = [d.vid + ':' + d.pid, d.id, d.note].filter(Boolean).join(' · ');
     return `<div class="row"><div class="dicon">${ICON}</div>
       <div class="dinfo"><div class="dname">${esc(d.name)}</div><div class="dsub">${esc(sub)}</div></div>
@@ -752,7 +752,7 @@ function renderPairing(s) {
     const f = document.querySelector('#paircode input'); if (f) f.focus();
   } else if (stage === 'done') {
     modal(`<h3>${p.ok ? 'Paired' : 'Not paired'}</h3>
-      <p>${esc(p.msg)}</p>${p.ok ? '<p>You can now give devices between the two PCs with Give to, in This PC\'s Devices. This pairing is kept through updates.</p>' : ''}
+      <p>${esc(p.msg)}</p>${p.ok ? '<p>You can now give devices between the two PCs with Give To, in This PC\'s Devices. This pairing is kept through updates.</p>' : ''}
       <div class="acts">${p.ok ? '' : '<button class="btn" onclick="pairRestart()">Start again</button>'}<button class="btn primary" onclick="closeModal()">Close</button></div>`);
   } else if (stage === 'list') {
     const rows = cands.map(c => `<div class="pairpc">${PCICON}<span class="nm">${esc(c.name)}${c.paired ? ' <span class="pill accent">Paired</span>' : ''}</span>
@@ -788,7 +788,7 @@ function confirmUnpair(a) {
     <p>You can pair them again at any time.</p>
     <div class="acts"><button class="btn" onclick="pendingAct=null;closeModal()">Cancel</button><button class="btn danger" onclick="runPending()">Unpair</button></div>`);
 }
-// Give to: a small list of paired PCs under the button.
+// Give To: a small list of paired PCs under the button.
 function closeGive() { const g = document.getElementById('givemenu'); if (g) g.remove(); }
 function openGive(btn) {
   closeGive();

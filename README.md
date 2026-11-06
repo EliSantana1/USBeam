@@ -14,7 +14,7 @@ drives, security keys: one click to use them on another PC, one click to give th
 
 - **Share and use devices.** Every installation can share its own USB devices
   and use devices shared by other computers. No device limits.
-- **Give to.** Send a device from the PC it's plugged into straight to another
+- **Give To.** Send a device from the PC it's plugged into straight to another
   PC you've paired with: it connects there right away, no clicks needed on the other side.
 - **Pair your PCs** with a one-time 6-digit code. Paired PCs trust each other, and you can
   choose to let only paired PCs use your devices. Pairing is kept through updates.
@@ -30,7 +30,7 @@ drives, security keys: one click to use them on another PC, one click to give th
 
 | | |
 |:---:|:---:|
-| <img src="docs/screenshots/give-to.png" alt="Give to: send a device to a paired PC" width="420"><br>**Give to** a paired PC | <img src="docs/screenshots/pairing-code.png" alt="Pairing code shown on the other PC" width="420"><br>**Pairing:** type the code the other PC shows |
+| <img src="docs/screenshots/give-to.png" alt="Give To: send a device to a paired PC" width="420"><br>**Give To** a paired PC | <img src="docs/screenshots/pairing-code.png" alt="Pairing code shown on the other PC" width="420"><br>**Pairing:** type the code the other PC shows |
 | <img src="docs/screenshots/pair-a-pc.png" alt="Pair a PC: pick the other PC" width="420"><br>**Pair a PC:** pick the other PC | <img src="docs/screenshots/paired-pcs.png" alt="Paired PCs in the settings menu" width="420"><br>**Paired PCs** and "Only paired PCs" in settings |
 | <img src="docs/screenshots/connect-over.png" alt="Connect over: home network, ZeroTier or Tailscale" width="420"><br>**Connect over** your home network, ZeroTier or Tailscale | <img src="docs/screenshots/dark-theme.png" alt="Dark theme" width="420"><br>**Dark theme** |
 
@@ -80,7 +80,7 @@ quit USBeam or uninstall it.
 2. On one of them, pick the other PC and click **Pair**.
 3. Type the 6-digit code the other PC shows.
 
-That's it: the two PCs stay paired, also after updates. **Give to** (in **This PC's Devices**)
+That's it: the two PCs stay paired, also after updates. **Give To** (in **This PC's Devices**)
 now lists the other PC.
 
 ## License

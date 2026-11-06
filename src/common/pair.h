@@ -2,7 +2,7 @@
 // Copyright (C) 2026 the USBeam contributors
 //
 // pair.h - pairing two PCs with a 6-digit code, and the requests only paired PCs can make
-// (Give to, permission to use a device, unpair). Shared by Windows and Linux; included after client.h.
+// (Give To, permission to use a device, unpair). Shared by Windows and Linux; included after client.h.
 //
 // How it works:
 //   - Pairing is only possible while "Pair a PC" is open on a PC (2 minutes at most).
@@ -12,7 +12,7 @@
 //     about the code or the key. Someone pretending to be one of the PCs gets one guess per try,
 //     out of a million codes; after 3 tries the pairing ends and must be started again by hand.
 //   - Each pair of PCs keeps one 32-byte key, in a file only the system can read.
-//   - Later requests (Give to, permission to use a device, unpair) prove they come from a paired
+//   - Later requests (Give To, permission to use a device, unpair) prove they come from a paired
 //     PC by answering a random challenge with that key (BLAKE2b). Replayed answers don't work.
 //   Crypto: Monocypher 4 (src/common/monocypher), X25519 + Elligator 2 + BLAKE2b.
 //

@@ -176,7 +176,7 @@ static const char *dev_name(const char *busid, char *buf, size_t n) {
 
 // ---------------------------------------------------------------- bind / return
 // A USB reset right before a device goes to another PC. Without it, a device that was busy sending
-// data at that moment (a mouse being moved, for example while clicking "Give to" with it) can keep
+// data at that moment (a mouse being moved, for example while clicking "Give To" with it) can keep
 // one of its channels stuck: on the other PC its movement never arrives while its buttons work.
 // The reset starts every channel clean, on the device and on this PC. Its normal driver is already
 // detached here, so nothing on this PC is using it.
