@@ -14,6 +14,8 @@ OUT=$(mktemp)
 exec > >(tee -a "$OUT") 2>&1
 note() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=Mouse feel test::$(tail -n 80 "$OUT" | sed 's/%/%25/g; s/\r//g' | awk 'BEGIN{ORS="%0A"} {print}')"; }
 trap note EXIT
+trap 'echo "FAIL: the test took over 8 minutes"; exit 1' TERM
+( sleep 480; kill -TERM $$ ) 2>/dev/null &
 N=3000
 fail() { echo "FAIL: $*"; cleanup; exit 1; }
 G=/sys/kernel/config/usb_gadget/usbeamtest
@@ -94,8 +96,9 @@ run() {   # $1 = label, $2 = 1 for the old way
     python3 tests/mousefeel.py measure "$N" "$label" > "$LOG/result-$old" || { cat "$LOG/result-$old"; cat "$LOG"/*; fail "$label: measuring failed"; } &
     local m=$!
     sleep 1
-    python3 tests/mousefeel.py move "$N"
+    timeout 60 python3 tests/mousefeel.py move "$N" || echo "(the virtual mouse could not send all its reports within 60 s)"
     wait $m
+    echo "--- what USBeam said on this side:"; tail -5 "$LOG/use-$old"
     cat "$LOG/result-$old"
     pkill -f "build/usbeam use 10.77.0.2"; sleep 3
 }
