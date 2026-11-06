@@ -77,7 +77,7 @@ ping -c 20 -i 0.05 -q 10.77.0.2 | tail -1
 
 echo "== USBeam sharing it (other side)"
 LOG=$(mktemp -d)
-ip netns exec usbeamhost build/usbeam host >"$LOG/host" 2>&1 &
+(tail -f /dev/null | ip netns exec usbeamhost build/usbeam host >"$LOG/host" 2>&1) &   # (it quits when its input ends)
 sleep 2
 
 run() {   # $1 = label, $2 = 1 for the old way
