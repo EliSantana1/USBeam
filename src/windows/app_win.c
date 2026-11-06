@@ -932,6 +932,24 @@ static void write_token_file(void) {
     if (f) { fputs(g_ui_token, f); fclose(f); }
 }
 
+// "Start USBeam when this PC starts": the service starts automatically, or only when the app is
+// opened (the installer lets signed-in users start it). Applied again at every start, so an update
+// (which sets it to automatic) keeps the choice.
+static void plat_set_bootstart(int on) {
+    if (!g_svc) return;                                   // developer console run
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    SC_HANDLE svc = scm ? OpenServiceW(scm, L"USBeam", SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG) : NULL;
+    DWORD want = on ? SERVICE_AUTO_START : SERVICE_DEMAND_START, need = 0;
+    BYTE buf[8192]; QUERY_SERVICE_CONFIGW *qc = (QUERY_SERVICE_CONFIGW *)buf;
+    if (!svc) logm("Could not change whether USBeam starts with this PC (error %lu)", GetLastError());
+    else if (!QueryServiceConfigW(svc, qc, sizeof buf, &need) || qc->dwStartType != want) {
+        if (!ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, want, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL))
+            logm("Could not change whether USBeam starts with this PC (error %lu)", GetLastError());
+    }
+    if (svc) CloseServiceHandle(svc);
+    if (scm) CloseServiceHandle(scm);
+}
+
 static int engine_run(void) {
     InitializeCriticalSection(&g_log_cs);
     InitializeCriticalSection(&g_devs_cs);
@@ -982,6 +1000,7 @@ static int engine_run(void) {
     load_config();
     if (!g_id[0]) { make_random_id(g_id); save_config(); }
     pair_load();
+    plat_set_bootstart(g_boot_start);
     refresh_devices();
     for (int i = 0; i < MAX_DEVS; i++) {     // safety net
         Dev *d = &g_devs[i];

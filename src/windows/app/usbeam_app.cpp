@@ -36,6 +36,7 @@
 #define WM_TRAY (WM_APP + 1)
 #define WM_SHOW_APP (WM_APP + 2)
 #define WM_REPORT (WM_APP + 3)
+#define WM_QUIT_APP (WM_APP + 4)       // "Quit USBeam" from the gear menu (same as the tray's Quit)
 #define TIMER_CHECK 1
 
 static HWND g_hwnd;
@@ -133,6 +134,25 @@ static void ensure_service() {
         CloseServiceHandle(svc);
     }
     CloseServiceHandle(scm);
+}
+
+// At sign-in: false when "Start USBeam when this PC starts" is off (the service is set to start
+// only when the app is opened) and the service isn't running. If unsure, true (as before).
+static bool service_wanted_at_signin() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return true;
+    bool wanted = true;
+    SC_HANDLE svc = OpenServiceW(scm, L"USBeam", SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS);
+    if (svc) {
+        alignas(8) BYTE buf[8192]; DWORD need = 0;
+        QUERY_SERVICE_CONFIGW *qc = reinterpret_cast<QUERY_SERVICE_CONFIGW *>(buf);
+        SERVICE_STATUS st;
+        if (QueryServiceConfigW(svc, qc, sizeof buf, &need) && qc->dwStartType == SERVICE_DEMAND_START &&
+            QueryServiceStatus(svc, &st) && st.dwCurrentState == SERVICE_STOPPED) wanted = false;
+        CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+    return wanted;
 }
 
 static bool system_dark() {
@@ -297,6 +317,8 @@ static void app_link(const std::wstring &uri) {
         report(L"Uninstalling… Windows will ask for permission.");
         if (!ShellExecuteExW(&se)) report(L"Uninstall was cancelled.");
         else g_quitting = true;          // the uninstaller closes this app
+    } else if (what == L"quit") {                     // confirmed in the page when a device is in use
+        PostMessageW(g_hwnd, WM_QUIT_APP, 0, 0);      // after this navigation event, not inside it
     }
 }
 
@@ -434,15 +456,17 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
             DestroyMenu(m);
             if (cmd == 1) show_window();
-            else if (cmd == 2) {
-                // Quit = stop everything: the service ends all connections, returns shared
-                // devices to this PC and releases devices used from other PCs. Then close.
-                g_quitting = true;
-                ShowWindow(h, SW_HIDE);
-                post_action("{\"op\":\"quit\"}");
-                DestroyWindow(h);
-            }
+            else if (cmd == 2) PostMessageW(h, WM_QUIT_APP, 0, 0);
         }
+        return 0;
+    case WM_QUIT_APP:
+        // Quit = stop everything: the service ends all connections, returns shared
+        // devices to this PC and releases devices used from other PCs. Then close.
+        if (g_quitting) return 0;
+        g_quitting = true;
+        ShowWindow(h, SW_HIDE);
+        post_action("{\"op\":\"quit\"}");
+        DestroyWindow(h);
         return 0;
     case WM_SHOW_APP:
         show_window();
@@ -466,6 +490,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int show) {
     bool tray_only = cmd && wcsstr(cmd, L"--tray");
+    // At sign-in with "Start USBeam when this PC starts" off: nothing runs until USBeam is opened.
+    if (tray_only && !service_wanted_at_signin()) return 0;
     HANDLE mtx = CreateMutexW(nullptr, TRUE, L"Local\\USBeamAppWindow");
     if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) {        // already running: bring it forward
         HWND other = FindWindowW(L"USBeamAppWindow", nullptr);

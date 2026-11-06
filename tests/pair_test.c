@@ -69,6 +69,7 @@ static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) 
 static void plat_stop_retries(void) {}
 static const char *plat_attach_error(void) { return "error"; }
 static int plat_restart_needed(void) { return 0; }
+static void plat_set_bootstart(int on) { (void)on; }
 static void peer_label(const char *ip, char *out, size_t n, int cl_held) { (void)cl_held; snprintf(out, n, "%s", ip); }
 static void logm(const char *f, ...) { va_list a; va_start(a, f); printf("    [%s] ", g_name); vprintf(f, a); printf("\n"); va_end(a); fflush(stdout); }
 static void client_save(void) {}

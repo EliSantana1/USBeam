@@ -100,6 +100,18 @@ static void plat_detach(int port) { if (plat_port_alive(port, NULL, NULL)) detac
 static void plat_stop_retries(void) {}           // Linux's vhci-hcd never reconnects by itself
 static const char *plat_attach_error(void) { return g_attach_err; }
 static int plat_restart_needed(void) { return 0; }
+
+// "Start USBeam when this PC starts": the service is enabled (starts at boot) or disabled (starts
+// only when the app is opened; the app starts it through USBeam's polkit rule). Applied again at
+// every start, so an update (which enables the service) keeps the choice.
+static int g_bootctl;              // 1 when running as the real service (not a developer test)
+static void plat_set_bootstart(int on) {
+    if (!g_bootctl) return;
+    int enabled = system("systemctl is-enabled --quiet usbeam.service 2>/dev/null") == 0;
+    if (enabled == !!on) return;
+    if (system(on ? "systemctl enable --quiet usbeam.service 2>/dev/null" : "systemctl disable --quiet usbeam.service 2>/dev/null") != 0)
+        logm("Could not change whether USBeam starts with this PC");
+}
 static int plat_attached(int *port, char (*ip)[64], char (*busid)[32], int max) {
     int n = 0;
     DIR *d = opendir("/run/usbeam");
@@ -935,6 +947,8 @@ static int cmd_app(int service) {
     load_settings();
     pair_load();
     if (!g_id[0]) { make_random_id(g_id); save_settings(); }
+    g_bootctl = service && !uitest;
+    plat_set_bootstart(g_boot_start);
 
     // Safety net: return anything left bound to usbip-host.
     DIR *dd = opendir(USBDEV); struct dirent *e;

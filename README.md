@@ -58,7 +58,6 @@ See [Releases](../../releases):
 
 - **Windows** (Intel/AMD and ARM): `USBeam-Setup-<version>.exe`
 - **Linux** (most distributions with systemd): `USBeam-<version>-x86_64.AppImage`
-- **Arch Linux and Arch-based**: `usbeam-<version>-x86_64.pkg.tar.zst`
 
 ## Installing
 
@@ -72,7 +71,8 @@ See [Releases](../../releases):
 3. Double-click the file, click **Install**, and enter your password.
 
 USBeam then starts with your computer, appears in your application menu, and updates itself
-from its settings menu (the gear icon), where you can also uninstall it.
+from its settings menu (the gear icon). There you can also turn off starting with the computer,
+quit USBeam or uninstall it.
 
 ## Pairing two PCs
 

@@ -2,7 +2,6 @@
 # Builds USBeam on every push:
 #   - Windows installer (x64 + ARM64 in one setup program)
 #   - Linux AppImage (most distributions with systemd)
-#   - Linux package for Arch-based systems
 # and tests it: stricter builds, a network-drop test, and upgrade / second-launch / uninstall
 # tests on Linux and Windows (from the previous release to this build).
 # Pushing a tag like v0.3.0 also publishes a GitHub Release with the files, only if every test passed.
@@ -75,23 +74,6 @@ jobs:
         with:
           name: USBeam-Windows-Setup
           path: build/USBeam-Setup-*.exe
-
-  linux-arch-package:
-    runs-on: ubuntu-24.04
-    container: archlinux:latest
-    steps:
-      - name: Install build tools
-        run: pacman -Syu --noconfirm --needed base-devel git python qt6-base qt6-webengine
-      - uses: actions/checkout@v4
-      - name: Build package
-        run: |
-          useradd -m builder
-          chown -R builder "$GITHUB_WORKSPACE"
-          su builder -c "cd '$GITHUB_WORKSPACE/packaging/linux' && makepkg --noconfirm -f"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: USBeam-Linux-Arch-package
-          path: packaging/linux/*.pkg.tar.zst
 
   linux-appimage:
     runs-on: ubuntu-22.04
@@ -207,16 +189,19 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows-installer, linux-appimage, linux-arch-package, checks, linux-upgrade-test, windows-upgrade-test]
+    needs: [windows-installer, linux-appimage, checks, linux-upgrade-test, windows-upgrade-test]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Release notes (install steps for this version)
+        run: sed "s/@VERSION@/${GITHUB_REF_NAME#v}/g" packaging/release-notes.md > release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: |
             dist/USBeam-Setup-*.exe
             dist/USBeam-*.AppImage
-            dist/*.pkg.tar.zst

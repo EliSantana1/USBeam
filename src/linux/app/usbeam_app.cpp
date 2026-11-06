@@ -138,6 +138,18 @@ static void ensureService() {
     launchDetached("systemctl", { "start", "--no-ask-password", "usbeam.service" });
 }
 
+// At sign-in: false when "Start USBeam when this PC starts" is off (the service is disabled)
+// and the service isn't running. If unsure (not installed, systemctl missing), true as before.
+static bool serviceWantedAtSignin() {
+    auto ask = [](const char *what) {
+        QProcess p;
+        p.start("systemctl", { what, "usbeam.service" });
+        if (!p.waitForFinished(5000)) { p.kill(); p.waitForFinished(1000); return QString(); }
+        return QString::fromLatin1(p.readAllStandardOutput()).trimmed();
+    };
+    return !(ask("is-enabled") == "disabled" && ask("is-active") != "active");
+}
+
 static bool darkTheme() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     if (QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark) return true;
@@ -396,6 +408,9 @@ int main(int argc, char **argv) {
         if (a.contains("--test-uninstall")) testMsg = "test-uninstall";
     }
 
+    // At sign-in with "Start USBeam when this PC starts" off: nothing runs until USBeam is opened.
+    if (trayOnly && testMsg.isEmpty() && !serviceWantedAtSignin()) return 0;
+
     if (testMsg.isEmpty()) {
         int r = appImageStart(forceInstall, fwd);
         if (r >= 0) return r;
@@ -459,14 +474,17 @@ int main(int argc, char **argv) {
     QMenu menu;
     menu.addAction("Open USBeam", [&] { win.showUp(); });
     menu.addSeparator();
-    menu.addAction("Quit USBeam", [&] {
-        // Quit = stop everything: the service ends all connections, returns shared devices
-        // to this PC and releases devices used from other PCs. Then close.
+    // Quit = stop everything: the service ends all connections, returns shared devices
+    // to this PC and releases devices used from other PCs. Then close.
+    // (Tray menu, and "Quit USBeam" in the gear menu.)
+    auto quitApp = [&] {
+        if (g_quitting) return;
         g_quitting = true;
         win.hide();
         postAction("{\"op\":\"quit\"}", [&app] { app.quit(); });
         QTimer::singleShot(3000, &app, [&app] { app.quit(); });
-    });
+    };
+    menu.addAction("Quit USBeam", quitApp);
     tray.setContextMenu(&menu);
     QObject::connect(&tray, &QSystemTrayIcon::activated, [&](QSystemTrayIcon::ActivationReason why) {
         if (why == QSystemTrayIcon::Trigger || why == QSystemTrayIcon::DoubleClick) {
@@ -571,6 +589,7 @@ int main(int argc, char **argv) {
             return;
         }
         if (what == "uninstall") { uninstall(); return; }
+        if (what == "quit") { QTimer::singleShot(0, &app, quitApp); return; }   // after this navigation request
         if (what == "update") {
             const QString src = q.queryItemValue("url", QUrl::FullyDecoded), sha = q.queryItemValue("sha256").toLower();
             const QString ver = q.queryItemValue("version");

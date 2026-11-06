@@ -180,7 +180,9 @@ h2.sub { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 
     <div class="sec"><div class="lbl">This PC's name</div>
       <div class="line"><input type="text" id="pcnamein" maxlength="40" aria-label="This PC's name" onkeydown="if(event.key==='Enter')saveName()"><button class="btn" onclick="saveName()">Save</button></div>
       <div class="small" id="pcnamehint"></div></div>
-    <div class="sec"><label class="auto" style="min-height:0"><input type="checkbox" id="traychk" onchange="act({op:'set_tray', on:this.checked})">Show USBeam in the tray when I sign in</label>
+    <div class="sec"><label class="auto" style="min-height:0"><input type="checkbox" id="bootchk" onchange="act({op:'set_bootstart', on:this.checked})">Start USBeam when this PC starts</label>
+      <div class="small">When off, USBeam only runs after you open it, until you quit it or restart the PC.</div>
+      <label class="auto" id="traylbl" style="min-height:0;margin-top:10px"><input type="checkbox" id="traychk" onchange="act({op:'set_tray', on:this.checked})">Show USBeam in the tray when I sign in</label>
       <div class="small">USBeam keeps sharing and connecting devices in the background either way.</div></div>
     <div class="sec"><div class="lbl">Networks</div><div id="menunets"></div></div>
     <div class="sec"><div class="line" style="justify-content:space-between"><span class="lbl" style="margin:0">Countdown after a device is plugged back in</span>
@@ -197,6 +199,7 @@ h2.sub { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 
       <button class="item" onclick="checkUpdates()">Check for updates</button>
       <div class="small" id="updstatus" style="padding:0 16px 6px;margin:0" hidden></div>
       <button class="item" onclick="restartUsbeam()">Restart USBeam</button>
+      <button class="item" onclick="confirmQuit()">Quit USBeam</button>
       <button class="item" onclick="saveDiagnostics()">Save diagnostics</button>
       <button class="item" onclick="confirmReset()">Reset USBeam…</button>
       <button class="item" onclick="showSecurity()">About network security</button>
@@ -548,7 +551,11 @@ function applyPrefs(s) {
   if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme;
   document.getElementById('themesel').value = p.theme || 'system';
   cselSync(document.getElementById('themesel'));
+  const boot = p.bootstart !== false;
+  document.getElementById('bootchk').checked = boot;
   document.getElementById('traychk').checked = p.tray !== false;
+  document.getElementById('traychk').disabled = !boot;
+  document.getElementById('traylbl').style.opacity = boot ? '' : '.5';
   document.getElementById('hiddenchk').checked = !!p.showhidden;
   document.getElementById('inputrelsel').value = String(p.inputrelease || 0);
   cselSync(document.getElementById('inputrelsel'));
@@ -571,6 +578,17 @@ async function post(body) {
   return r.json();
 }
 function restartUsbeam() { toggleMenu(); act({ op: 'restart' }); banner('USBeam is restarting…'); }
+// Quit: the same as Quit in the tray menu. Asks first only when a device is in use.
+function confirmQuit() {
+  toggleMenu();
+  const busyHere = (S.local || []).some(d => d.state === 'in_use' || d.state === 'switching');
+  const usingOthers = (S.pcs || []).some(pc => (pc.devices || []).some(d => d.state === 'mine' || d.state === 'connecting'));
+  if (!busyHere && !usingOthers) { appLink('quit'); return; }
+  const what = [busyHere ? 'Devices other PCs are using come back to this PC.' : '', usingOthers ? 'Devices this PC uses from other PCs are let go.' : ''].filter(Boolean).join(' ');
+  modal(`<h3>Quit USBeam?</h3>
+    <p>${what} Nothing is shared or connected until you open USBeam again.</p>
+    <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="closeModal();appLink('quit')">Quit</button></div>`);
+}
 async function saveDiagnostics() {
   updStatus('Collecting…');
   try {
@@ -620,7 +638,7 @@ function closeModal() {
 function confirmReset() {
   toggleMenu();
   modal(`<h3>Reset USBeam?</h3>
-    <p>This lets go of devices this PC uses from other PCs, forgets remembered PCs${S.os === 'linux' ? ', allowed networks' : ''} and your settings (name, countdown, theme, tray). All of this PC's devices are shared again as usual.</p>
+    <p>This lets go of devices this PC uses from other PCs, forgets remembered PCs${S.os === 'linux' ? ', allowed networks' : ''} and your settings (name, countdown, theme, start with the PC, tray). All of this PC's devices are shared again as usual.</p>
     <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="closeModal();act({op:'reset'})">Reset</button></div>`);
 }
 function showAbout() {

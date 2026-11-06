@@ -3,7 +3,7 @@
 ; Installs the USBeam service (starts with Windows) and the USBeam app
 ; (tray icon at sign-in, window on demand).
 
-#define AppVersion "0.3.20"
+#define AppVersion "0.3.21"
 ; usbip-win2: the driver Windows needs to use devices from other PCs. Bundled and always installed
 ; (when missing or older), visibly, before USBeam itself. github.com/vadimgrn/usbip-win2,
 ; BSD-2-Clause, see THIRD-PARTY.txt.
@@ -65,7 +65,8 @@ Filename: "{sys}\sc.exe"; Parameters: "failure USBeam reset= 86400 actions= rest
 ; "Restart USBeam" in the app ends the service with an error code: Windows then starts it again.
 Filename: "{sys}\sc.exe"; Parameters: "failureflag USBeam 1"; Flags: runhidden waituntilterminated
 ; Signed-in users may start/stop this one service (the app's Quit and restart), nothing else.
-Filename: "{sys}\sc.exe"; Parameters: "sdset USBeam D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;IU)"; Flags: runhidden waituntilterminated
+; The service itself may change its start type ("Start USBeam when this PC starts").
+Filename: "{sys}\sc.exe"; Parameters: "sdset USBeam D:(A;;CCDCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;IU)"; Flags: runhidden waituntilterminated
 Filename: "{sys}\sc.exe"; Parameters: "start USBeam"; Flags: runhidden waituntilterminated
 Filename: "{app}\USBeam.exe"; Description: "Open USBeam now"; Flags: postinstall nowait skipifsilent runasoriginaluser
 ; Updates from inside the app run this installer silently: reopen the app afterwards.

@@ -627,6 +627,8 @@ static char g_hostname[64];       // the computer's own name (used when no name 
 static char g_custom_name[64];    // "Rename this PC" ("" = use the computer's name)
 static char g_theme[8] = "system";
 static int g_tray_login = 1;      // show the tray icon at sign-in
+static int g_boot_start = 1;      // "Start USBeam when this PC starts" (applied by plat_set_bootstart)
+static void plat_set_bootstart(int on);   // make the service start with the PC, or only when USBeam is opened
 static void prefs_apply_name(void) {
     snprintf(g_name, sizeof g_name, "%s", g_custom_name[0] ? g_custom_name : g_hostname);
 }
@@ -636,13 +638,16 @@ static void prefs_init(void) {     // call once after the computer's name is kno
 static void prefs_json(sb_t *j) {
     sb_add(j, "\"prefs\":{\"name\":", 16); sb_jstr(j, g_custom_name);
     sb_add(j, ",\"hostname\":", 12); sb_jstr(j, g_hostname);
-    sb_printf(j, ",\"hold\":%d,\"theme\":\"%s\",\"showhidden\":%s,\"inputwarned\":%s,\"inputrelease\":%d,\"tray\":%s}",
-              g_hold_secs, g_theme, g_show_hidden ? "true" : "false", g_input_warned ? "true" : "false", g_input_release, g_tray_login ? "true" : "false");
+    // "tray" stays last: the tray app looks for "tray":false} at sign-in.
+    sb_printf(j, ",\"hold\":%d,\"theme\":\"%s\",\"showhidden\":%s,\"inputwarned\":%s,\"inputrelease\":%d,\"bootstart\":%s,\"tray\":%s}",
+              g_hold_secs, g_theme, g_show_hidden ? "true" : "false", g_input_warned ? "true" : "false", g_input_release,
+              g_boot_start ? "true" : "false", g_tray_login ? "true" : "false");
 }
 static void prefs_reset(void) {
     g_custom_name[0] = 0; prefs_apply_name();
     g_hold_secs = 10; snprintf(g_theme, sizeof g_theme, "system"); g_tray_login = 1;
     g_show_hidden = 0; g_input_warned = 0; g_input_release = 0;
+    if (!g_boot_start) { g_boot_start = 1; plat_set_bootstart(1); }
 }
 
 static void client_save_lines(FILE *f) {
@@ -651,6 +656,7 @@ static void client_save_lines(FILE *f) {
     if (g_custom_name[0]) fprintf(f, "pcname\t%s\n", g_custom_name);
     fprintf(f, "hold %d\ntheme %s\ntraylogin %d\nshowhidden %d\ninputwarned %d\ninputrelease %d\n",
             g_hold_secs, g_theme, g_tray_login, g_show_hidden, g_input_warned, g_input_release);
+    if (!g_boot_start) fprintf(f, "bootstart 0\n");
     for (int i = 0; i < CL_MAXR; i++)
         if (g_r[i].id[0] && g_r[i].manual) for (int k = 0; k < g_r[i].naddr; k++) fprintf(f, "pc %s\n", g_r[i].addr[k].ip);
     for (int i = 0; i < CL_MAXW; i++)
@@ -699,6 +705,7 @@ static int client_load_line(const char *line) {
     if (sscanf(line, "pairedonly %d", &n) == 1) { g_paired_only = n != 0; return 1; }
     if (sscanf(line, "hold %d", &n) == 1) { if (n >= 3 && n <= 120) g_hold_secs = n; return 1; }
     if (sscanf(line, "traylogin %d", &n) == 1) { g_tray_login = n != 0; return 1; }
+    if (sscanf(line, "bootstart %d", &n) == 1) { g_boot_start = n != 0; return 1; }
     if (sscanf(line, "showhidden %d", &n) == 1) { g_show_hidden = n != 0; return 1; }
     if (sscanf(line, "inputwarned %d", &n) == 1) { g_input_warned = n != 0; return 1; }
     if (sscanf(line, "inputrelease %d", &n) == 1) { if (n >= 0 && n <= 240) g_input_release = n; return 1; }
@@ -841,6 +848,13 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         snprintf(g_theme, sizeof g_theme, "%s", val); client_save(); return 1;
     }
     if (!strcmp(op, "set_tray")) { g_tray_login = json_bool(body, "on"); client_save(); return 1; }
+    if (!strcmp(op, "set_bootstart")) {
+        g_boot_start = json_bool(body, "on");
+        plat_set_bootstart(g_boot_start);
+        logm(g_boot_start ? "USBeam starts with this PC now" : "USBeam starts only when it's opened now");
+        client_save();
+        return 1;
+    }
     if (!strcmp(op, "set_showhidden")) { g_show_hidden = json_bool(body, "on"); client_save(); return 1; }
     if (!strcmp(op, "set_inputwarned")) { g_input_warned = 1; client_save(); return 1; }
     if (!strcmp(op, "set_inputrelease")) {
