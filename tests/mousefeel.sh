@@ -9,6 +9,11 @@
 # is smooth and the old way is clearly worse (so the test really sees the problem).
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# Everything shown is also kept, and handed to GitHub as one note at the end (readable without logging in).
+OUT=$(mktemp)
+exec > >(tee -a "$OUT") 2>&1
+note() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=Mouse feel test::$(tail -n 80 "$OUT" | sed 's/%/%25/g; s/\r//g' | awk 'BEGIN{ORS="%0A"} {print}')"; }
+trap note EXIT
 N=3000
 fail() { echo "FAIL: $*"; cleanup; exit 1; }
 G=/sys/kernel/config/usb_gadget/usbeamtest
@@ -35,7 +40,7 @@ echo 0 > functions/hid.usb0/subclass; echo 2 > functions/hid.usb0/protocol; echo
 printf '\x05\x01\x09\x02\xa1\x01\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x08\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x05\x01\x09\x30\x09\x31\x16\x01\x80\x26\xff\x7f\x75\x10\x95\x02\x81\x06\x09\x38\x15\x81\x25\x7f\x75\x08\x95\x01\x81\x06\xc0\xc0' > functions/hid.usb0/report_desc
 ln -s functions/hid.usb0 configs/c.1/
 ls /sys/class/udc | head -1 > UDC || fail "no virtual USB controller"
-cd - >/dev/null
+cd - >/dev/null || exit 1
 sleep 2
 BUSID=""
 for d in /sys/bus/usb/devices/*; do

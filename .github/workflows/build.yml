@@ -132,7 +132,7 @@ jobs:
       - name: Build the Linux engine
         run: make linux
       - name: Mouse feel test (straight, complete, evenly timed movement)
-        run: sudo bash tests/mousefeel.sh
+        run: sudo -E bash tests/mousefeel.sh
 
   # Install the previous release, update to this build (also from inside the app), start the app
   # several times, uninstall: one app and one runtime at every step, nothing left behind.
