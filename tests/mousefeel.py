@@ -18,12 +18,16 @@ if cmd == "find": sys.exit(0 if shared_mouse(len(sys.argv) > 2) else 1)
 
 if cmd == "move":
     n = int(sys.argv[2]); fd = os.open("/dev/hidg0", os.O_WRONLY)
-    rep = struct.pack("<BhhB", 0, 2, 1, 0); t = time.monotonic()
+    rep = struct.pack("<BhhB", 0, 2, 1, 0); t = t0 = time.monotonic(); w = []
     for i in range(n):
+        a = time.monotonic()
         os.write(fd, rep)          # waits while the previous report hasn't been picked up
+        w.append((time.monotonic() - a) * 1000)
         t += 0.001
         d = t - time.monotonic()
         if d > 0: time.sleep(d)
+    w.sort()
+    print(f"  (virtual mouse: {n / (time.monotonic() - t0):.0f} reports/s sent; waiting to send one: median {w[len(w) // 2]:.2f} ms, p90 {w[int(0.9 * len(w))]:.2f} ms)")
     sys.exit(0)
 
 if cmd == "measure":

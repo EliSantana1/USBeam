@@ -269,6 +269,7 @@ static int cmd_use(const char *ip, int n, char **busids) {
     logm("Detaching...");
     for (int i = 0; i < n; i++) if (w[i].port >= 0 && (port_status(w[i].port) == ST_USED || port_status(w[i].port) == ST_NOTASSIGNED)) { detach_port(w[i].port); logm("[%s] detached", w[i].busid); }
     free(w);
+    usleep(500000);                       // let the relays finish (they log their numbers)
     return 0;
 }
 
