@@ -48,9 +48,6 @@ function Run([string]$label, [bool]$relay, [bool]$delay, [string]$mode = '') {
 $goal = Run 'no delay, directly              ' $false $false
 $old  = Run 'old way (directly)              ' $false $true
 $new  = Run 'new way (through USBeam relay)  ' $true  $true
-# Diagnostics: the driver's low-latency receive mode
-$null = Run 'old way, low-latency mode       ' $false $true 'low-latency'
-$null = Run 'new way, low-latency mode       ' $true  $true 'low-latency'
 if ($goal -and $old -and $new) {
     if ($new.rate -ge 0.9 * $goal.rate) { Note "OK: new way: $($new.rate) reports/s (without delay: $($goal.rate))" } else { Note "FAIL: new way: only $($new.rate) reports/s (without delay: $($goal.rate))"; $fails++ }
     if ($new.p90 -le $goal.p90 + 1) { Note "OK: new way: 90% of reports within $($new.p90) ms (without delay: $($goal.p90))" } else { Note "FAIL: new way: 90% of reports within $($new.p90) ms (without delay: $($goal.p90))"; $fails++ }

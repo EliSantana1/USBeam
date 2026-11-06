@@ -110,6 +110,7 @@ static int st_thread_start(st_thread_ret (*fn)(void *), void *arg) {
 #define ST_BUFMAX  128        // reports held here at most (then reading ahead pauses; nothing is dropped)
 #define ST_SEQBIT  0x80000000u  // this relay's own request numbers (the kernel's stay below)
 #define ST_MAXFWD  4096       // forwarded requests in flight (drives use many)
+#define ST_MAXOUT  2048       // our own requests in flight: reads ahead on up to 15 endpoints, and cancels
 
 typedef struct { uint8_t hdr[48]; uint32_t len; uint8_t *data; } StRep;
 
@@ -141,7 +142,7 @@ typedef struct {
     int dead;
     StEp ep[16];
     uint32_t next_seq;
-    StOut out[256];           // reads ahead and cancels sent by us
+    StOut out[ST_MAXOUT];     // reads ahead and cancels sent by us
     struct { uint32_t seq; uint8_t dir; uint8_t used; } fwd[ST_MAXFWD];   // kernel requests passed on
     struct { uint32_t seq, target; uint8_t used; } unl[64];               // kernel cancels passed on
     int refs;
@@ -183,7 +184,7 @@ static void st_unref(Stream *st) {
 
 // ---- requests we send ourselves (mx held)
 static StOut *st_out_new(Stream *st, uint8_t ep, uint8_t dir, uint32_t epoch) {
-    for (int i = 0; i < 256; i++) if (!st->out[i].used) {
+    for (int i = 0; i < ST_MAXOUT; i++) if (!st->out[i].used) {
         StOut *o = &st->out[i];
         o->used = 1; o->ep = ep; o->dir = dir; o->epoch = epoch;
         o->seq = ST_SEQBIT | (st->next_seq++ & 0x7FFFFFFFu);
@@ -193,7 +194,7 @@ static StOut *st_out_new(Stream *st, uint8_t ep, uint8_t dir, uint32_t epoch) {
     return NULL;
 }
 static StOut *st_out_find(Stream *st, uint32_t seq) {
-    for (int i = 0; i < 256; i++) if (st->out[i].used && st->out[i].seq == seq) return &st->out[i];
+    for (int i = 0; i < ST_MAXOUT; i++) if (st->out[i].used && st->out[i].seq == seq) return &st->out[i];
     return NULL;
 }
 static void st_net_write(Stream *st, const uint8_t *h, const uint8_t *data, uint32_t n) {
@@ -334,7 +335,7 @@ static st_thread_ret ST_THREAD st_up(void *arg) {
                 p->waiting = 0; p->stopped = 1; p->epoch++;      // cancelled: drop what is queued and read ahead
                 for (int i = 0; i < p->qn; i++) free(p->q[(p->qh + i) % ST_BUFMAX].data);
                 p->qn = 0; p->qh = 0; p->next_ns = 0;
-                for (int i = 0; i < 256 && nc < ST_AHEAD * 2; i++) {
+                for (int i = 0; i < ST_MAXOUT && nc < ST_AHEAD * 2; i++) {
                     StOut *o = &st->out[i];
                     if (!o->used || o->ep != e || !o->dir) continue;
                     StOut *c = st_out_new(st, (uint8_t)e, 0, p->epoch);   // cancel our read ahead
@@ -421,7 +422,7 @@ static st_thread_ret ST_THREAD st_down(void *arg) {
             if (seq & ST_SEQBIT) {                               // answer to one of our cancels
                 st_lock(&st->mx);
                 StOut *o = st_out_find(st, seq); if (o) o->used = 0;
-                for (int i = 0; i < 256; i++) if (st->out[i].used && st->out[i].dir && st->out[i].epoch != st->ep[st->out[i].ep].epoch) st->out[i].used = 0;
+                for (int i = 0; i < ST_MAXOUT; i++) if (st->out[i].used && st->out[i].dir && st->out[i].epoch != st->ep[st->out[i].ep].epoch) st->out[i].used = 0;
                 st_unlock(&st->mx);
                 continue;
             }
