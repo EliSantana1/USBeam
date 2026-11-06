@@ -67,7 +67,7 @@ static uint32_t g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16
 static uint16_t g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 
 #include "netsock.h"
-#include "stream.h"
+#include "../common/stream.h"
 
 static int connect_host(const char *ip) {
     struct sockaddr_in a = {0};

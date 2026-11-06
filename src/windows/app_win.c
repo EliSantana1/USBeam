@@ -413,6 +413,7 @@ static int have_usbip(void) { return GetFileAttributesW(g_usbip_exe) != INVALID_
 
 // Ports currently attached, parsed from `usbip port` (blocks: "Port NN: ..." then "-> usbip://host:3240/busid").
 typedef struct { int port; char host[64], busid[32]; } Attached;
+#include "relay_win.h"
 static int usbip_ports(Attached *a, int max) {
     static char out[32768];
     if (run_hidden(g_usbip_exe, L"port", out, sizeof out, 15000) < 0) return -1;
@@ -423,8 +424,9 @@ static int usbip_ports(Attached *a, int max) {
         if (!strncmp(p, "Port ", 5) && sscanf(p + 5, "%d", &num) == 1) { cur = num; continue; }
         char *u = strstr(p, "usbip://");
         if (u && cur >= 0 && n < max) {
-            char host[64] = "", busid[32] = "";
-            if (sscanf(u + 8, "%63[^:]:%*d/%31s", host, busid) == 2) {
+            char host[64] = "", busid[32] = ""; int tport = 0;
+            if (sscanf(u + 8, "%63[^:]:%d/%31s", host, &tport, busid) == 3) {
+                if (!strcmp(host, "127.0.0.1")) relay_host((uint16_t)tport, host, sizeof host);   // relayed: the real PC
                 a[n].port = cur;
                 snprintf(a[n].host, sizeof a[n].host, "%s", host);
                 snprintf(a[n].busid, sizeof a[n].busid, "%s", busid);
@@ -509,21 +511,27 @@ static int usbip_attach(const char *host, const char *busid) {
     return port;
 }
 static int usbip_attach_once(const char *host, const char *busid) {
-    wchar_t args[256];
+    wchar_t args[256], via[64] = L"";
     char out[2048] = "";
-    _snwprintf(args, 256, L"attach -r %hs -b %hs%ls", host, busid, g_no_once ? L"" : L" --once");
+    // Smooth input: the driver connects to USBeam on this PC (relay_win.h), which connects to the other PC.
+    uint16_t lport = relay_open(host, busid);
+    const char *to = lport ? "127.0.0.1" : host;
+    if (lport) _snwprintf(via, 64, L"--tcp-port %u ", (unsigned)lport);
+    _snwprintf(args, 256, L"%lsattach -r %hs -b %hs%ls", via, to, busid, g_no_once ? L"" : L" --once");
     args[255] = 0;
     run_hidden(g_usbip_exe, args, out, sizeof out, 60000);
     if (!g_no_once && usbip_unknown_option(out)) {
         g_no_once = 1;
         logm("usbip-win2 has no --once option (older version): attaching without it");
-        _snwprintf(args, 256, L"attach -r %hs -b %hs", host, busid);
+        if (lport) { relay_forget(lport); lport = relay_open(host, busid); to = lport ? "127.0.0.1" : host; via[0] = 0; if (lport) _snwprintf(via, 64, L"--tcp-port %u ", (unsigned)lport); }
+        _snwprintf(args, 256, L"%lsattach -r %hs -b %hs", via, to, busid);
         args[255] = 0;
         out[0] = 0;
         run_hidden(g_usbip_exe, args, out, sizeof out, 60000);
     }
     char *p = strstr(out, "port ");
-    if (strstr(out, "succes") && p) { logm("attach %s %s: %s", host, busid, out); return atoi(p + 5); }
+    if (strstr(out, "succes") && p) { logm("attach %s %s%s: %s", host, busid, lport ? " (smooth input)" : "", out); return atoi(p + 5); }
+    if (lport) relay_forget(lport);
     logm("attach %s %s failed: %s", host, busid, out);
     attach_error_from(out);
     return -1;

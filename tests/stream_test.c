@@ -15,7 +15,7 @@
 #include <sys/socket.h>
 #include <stdarg.h>
 static void logm(const char *fmt, ...) { va_list a; va_start(a, fmt); vprintf(fmt, a); va_end(a); printf("\n"); }
-#include "../src/linux/stream.h"
+#include "../src/common/stream.h"
 
 #define REPORTS 3000
 static uint64_t made_at[1 << 16];   // when the simulated mouse made report number n
