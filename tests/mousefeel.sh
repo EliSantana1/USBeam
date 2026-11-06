@@ -91,7 +91,7 @@ sleep 2
 
 run() {   # $1 = label, $2 = 1 for the old way
     local label=$1 old=$2
-    if [ "$old" = 1 ]; then USBEAM_NOSTREAM=1 build/usbeam use 10.77.0.2 "$BUSID" >"$LOG/use-$old" 2>&1 &
+    if [ "$old" = 1 ] || [ "$old" = 3 ]; then USBEAM_NOSTREAM=1 build/usbeam use 10.77.0.2 "$BUSID" >"$LOG/use-$old" 2>&1 &
     else build/usbeam use 10.77.0.2 "$BUSID" >"$LOG/use-$old" 2>&1 & fi
     local up=0
     for _ in $(seq 1 30); do
@@ -111,6 +111,11 @@ run() {   # $1 = label, $2 = 1 for the old way
 }
 run "old way (one report per round trip)" 1
 run "new way (streamed)                 " 0
+# Diagnostics: both ways once more without the added network delay, and the CPU load.
+tc qdisc del dev usbeam0 root; ip netns exec usbeamhost tc qdisc del dev usbeam1 root
+run "old way, no delay                  " 3
+run "new way, no delay                  " 2
+uptime
 
 read -r old_rate old_p90 _ < <(awk '/^NUMBERS/ {print $2, $3, $4}' "$LOG/result-1")
 read -r new_rate new_p90 new_ok < <(awk '/^NUMBERS/ {print $2, $3, $5}' "$LOG/result-0")
