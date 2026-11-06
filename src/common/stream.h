@@ -124,6 +124,8 @@ typedef struct {
     uint32_t epoch;           // bumped when the kernel cancels: late replies are dropped
     StRep q[ST_BUFMAX]; int qh, qn;
     uint64_t pace_ns, next_ns;
+    uint64_t last_arr, avg_gap;  // when the last report came in; the device's own pace, learned from arrivals
+    uint32_t iv;
 } StEp;
 
 typedef struct { uint32_t seq; uint8_t ep, dir, used; uint32_t epoch; } StOut;   // our reads ahead / cancels
@@ -168,9 +170,11 @@ static void st_unref(Stream *st) {
     int left = --st->refs;
     st_unlock(&st->mx);
     if (left) return;
-    logm("[%s] smooth input: %llu reads ahead sent, %llu answered, %llu reports handed over (%llu spaced out), stopped %llu times, most waiting there %d, most queued here %d",
+    uint32_t iv = 0; uint64_t gap = 0;
+    for (int e = 1; e < 16; e++) if (st->ep[e].on) { iv = st->ep[e].iv; gap = st->ep[e].avg_gap; break; }
+    logm("[%s] smooth input: %llu reads ahead sent, %llu answered, %llu reports handed over (%llu spaced out), stopped %llu times, most waiting there %d, most queued here %d, interval asked %u, device pace %.2f ms",
          st->busid, (unsigned long long)st->n_ahead, (unsigned long long)st->n_back, (unsigned long long)st->n_given,
-         (unsigned long long)st->n_paced, (unsigned long long)st->n_stopped, st->max_ahead, st->max_q);
+         (unsigned long long)st->n_paced, (unsigned long long)st->n_stopped, st->max_ahead, st->max_q, iv, gap / 1e6);
     for (int e = 0; e < 16; e++) for (int i = 0; i < st->ep[e].qn; i++) free(st->ep[e].q[(st->ep[e].qh + i) % ST_BUFMAX].data);
     st_closesock(st->net); st_closesock(st->kern);
     st_mutex_destroy(&st->mx); st_mutex_destroy(&st->net_mx); st_mutex_destroy(&st->kern_mx); st_cond_destroy(&st->cv);
@@ -238,7 +242,10 @@ static uint64_t st_deliver(Stream *st, int e) {
     p->waiting = 0; st->n_given++;
     // Several waiting: hand them over a little faster than the device makes them, so the timing
     // stays even and the delay drains: 1.1x with a few queued, 1.7x with more.
-    if (n) p->next_ns = !p->qn ? 0 : now + (p->qn <= 4 ? p->pace_ns : p->pace_ns * 2 / 3);
+    // The device's pace is learned from how often reports come in (systems describe the polling
+    // interval differently); until then, from the interval the system asked for.
+    uint64_t pace = p->avg_gap ? p->avg_gap * 9 / 10 : p->pace_ns;
+    if (n) p->next_ns = !p->qn ? 0 : now + (p->qn <= 4 ? pace : pace * 2 / 3);
     st_unlock(&st->mx);
     st_lock(&st->kern_mx);
     int bad = st_send(st->kern, h, 48) || (n && st_send(st->kern, data, n));
@@ -297,7 +304,7 @@ static st_thread_ret ST_THREAD st_up(void *arg) {
                     uint64_t pace = (uint64_t)iv * unit * 9 / 10;
                     if (pace < 125000ull) pace = 125000ull;
                     if (pace > 16000000ull) pace = 16000000ull;
-                    p->pace_ns = pace;
+                    p->pace_ns = pace; p->iv = iv; p->avg_gap = 0; p->last_arr = 0;
                 }
                 memcpy(p->sub, h, 48);
                 p->wait_seq = seq; p->waiting = 1; p->stopped = 0;
@@ -382,6 +389,11 @@ static st_thread_ret ST_THREAD st_down(void *arg) {
                         if (p->qn < ST_BUFMAX) {
                             StRep *r = &p->q[(p->qh + p->qn) % ST_BUFMAX];
                             memcpy(r->hdr, h, 48); r->len = actual; r->data = data; p->qn++; keep = 1;
+                            if (actual) {                                 // learn the device's pace
+                                uint64_t t = st_now(), g = p->last_arr ? t - p->last_arr : 0;
+                                if (g && g < 20000000ull) p->avg_gap = p->avg_gap ? (p->avg_gap * 31 + g) / 32 : g;
+                                p->last_arr = t;
+                            }
                             if ((int32_t)st_g32(h + 20) != 0) { p->stopped = 1; st->n_stopped++; }   // an error: the kernel decides what next
                             if (p->qn > st->max_q) st->max_q = p->qn;
                         }
