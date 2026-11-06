@@ -30,10 +30,17 @@ for m in dummy_hcd libcomposite usb_f_hid usbip-host vhci-hcd usbhid; do
 done
 apt-cache search --names-only "linux-(modules|headers).*$(uname -r)" 2>/dev/null | head -5
 if ! modprobe dummy_hcd 2>/dev/null; then
-    apt-get update -q >/dev/null 2>&1
-    apt-get install -y -q "linux-modules-extra-$(uname -r)" 2>&1 | tail -3
+    # Not shipped with this kernel: build the virtual USB controller from the kernel's own source.
+    K=$(uname -r); V=$(echo "$K" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+    apt-get install -y -q "linux-headers-$K" >/dev/null 2>&1
+    D=$(mktemp -d)
+    curl -fsSL -o "$D/dummy_hcd.c" "https://raw.githubusercontent.com/torvalds/linux/v$V/drivers/usb/gadget/udc/dummy_hcd.c" || fail "couldn't get dummy_hcd.c for $V"
+    echo "obj-m := dummy_hcd.o" > "$D/Makefile"
+    make -s -C "/lib/modules/$K/build" M="$D" modules 2>&1 | tail -5
+    modprobe udc-core 2>/dev/null; modprobe libcomposite
+    insmod "$D/dummy_hcd.ko" || fail "couldn't load the virtual USB controller"
 fi
-for m in dummy_hcd libcomposite usb_f_hid usbip-host vhci-hcd; do
+for m in libcomposite usb_f_hid usbip-host vhci-hcd; do
     modprobe $m || fail "kernel module $m not available"
 done
 mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
