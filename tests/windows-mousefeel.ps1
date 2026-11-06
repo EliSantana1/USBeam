@@ -17,7 +17,7 @@ if (-not $p.WaitForExit(600000)) { Note 'FAIL: the usbip-win2 installer did not 
 $u = 'C:\Program Files\USBip\usbip.exe'
 if (-not (Test-Path $u)) { Note 'FAIL: usbip.exe missing'; exit 1 }
 
-function Run([string]$label, [bool]$relay, [bool]$delay) {
+function Run([string]$label, [bool]$relay, [bool]$delay, [string]$mode = '') {
     $fargs = "$($N + 1000)"; if (-not $delay) { $fargs += ' nodelay' }
     $fake = Start-Process -FilePath "$Bin\fakehid.exe" -ArgumentList $fargs -PassThru -NoNewWindow -RedirectStandardOutput "$env:TEMP\fake-$label.txt"
     Start-Sleep 1
@@ -30,7 +30,8 @@ function Run([string]$label, [bool]$relay, [bool]$delay) {
         if (-not $port -or $port -eq '0') { Note "FAIL: ${label}: the relay didn't start"; $script:fails++; return $null }
         $via = @('--tcp-port', $port)
     }
-    $out = & $u @via attach -r 127.0.0.1 -b 1-1 --once 2>&1 | Out-String
+    $rm = @(); if ($mode) { $rm = @('--receive-mode', $mode) }
+    $out = & $u @via attach -r 127.0.0.1 -b 1-1 --once @rm 2>&1 | Out-String
     $uport = if ($out -match 'port (\d+)') { $Matches[1] } else { $null }
     if (-not $uport) { Note "FAIL: ${label}: attach failed: $out"; $script:fails++; Stop-Process -Id $fake.Id -Force; return $null }
     $res = & "$Bin\winhid_measure.exe" $N $label 2>&1 | Out-String
@@ -47,6 +48,9 @@ function Run([string]$label, [bool]$relay, [bool]$delay) {
 $goal = Run 'no delay, directly              ' $false $false
 $old  = Run 'old way (directly)              ' $false $true
 $new  = Run 'new way (through USBeam relay)  ' $true  $true
+# Diagnostics: the driver's low-latency receive mode
+$null = Run 'old way, low-latency mode       ' $false $true 'low-latency'
+$null = Run 'new way, low-latency mode       ' $true  $true 'low-latency'
 if ($goal -and $old -and $new) {
     if ($new.rate -ge 0.9 * $goal.rate) { Note "OK: new way: $($new.rate) reports/s (without delay: $($goal.rate))" } else { Note "FAIL: new way: only $($new.rate) reports/s (without delay: $($goal.rate))"; $fails++ }
     if ($new.p90 -le $goal.p90 + 1) { Note "OK: new way: 90% of reports within $($new.p90) ms (without delay: $($goal.p90))" } else { Note "FAIL: new way: 90% of reports within $($new.p90) ms (without delay: $($goal.p90))"; $fails++ }
