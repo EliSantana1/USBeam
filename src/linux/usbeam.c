@@ -67,6 +67,7 @@ static uint32_t g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16
 static uint16_t g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 
 #include "netsock.h"
+#include "stream.h"
 
 static int connect_host(const char *ip) {
     struct sockaddr_in a = {0};
@@ -205,17 +206,33 @@ static int attach_one(const char *ip, Want *w) {
     uint32_t busnum = g32(d + 288), devnum = g32(d + 292), speed = g32(d + 296);
     int port = free_port(speed >= 5);
     if (port < 0) { close(s); snprintf(g_attach_err, sizeof g_attach_err, "All of this PC's virtual USB ports are in use. Release a device first."); logm("[%s] no free virtual USB port", w->busid); return -1; }
-    struct timeval tv = { 0, 0 };            // kernel owns the socket from here: no timeouts
+    struct timeval tv = { 0, 0 };            // from here on: no time limits on this connection
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    // The kernel gets one end of a local socket pair; the relay in stream.h connects the other
+    // end to the network (smooth mice and keyboards). USBEAM_NOSTREAM=1: the kernel gets the
+    // network connection itself, as before (tests compare the two).
+    int pair[2] = { -1, -1 }, kfd = s;
+    if (!getenv("USBEAM_NOSTREAM")) {
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0) kfd = pair[0];
+        else logm("[%s] could not set up smooth input (%s): connecting directly", w->busid, strerror(errno));
+    }
     char val[64];
-    snprintf(val, sizeof val, "%d %d %u %u", port, s, (busnum << 16) | devnum, speed);
+    snprintf(val, sizeof val, "%d %d %u %u", port, kfd, (busnum << 16) | devnum, speed);
     if (write_sysfs(VHCI "/attach", val) < 0) {
         snprintf(g_attach_err, sizeof g_attach_err, "Linux refused to connect the device (%s).", strerror(errno));
         logm("[%s] kernel refused attach (%s)", w->busid, strerror(errno));
+        if (pair[0] >= 0) { close(pair[0]); close(pair[1]); }
         close(s); return -1;
     }
-    close(s);   // the kernel keeps its own reference to the connection
+    if (pair[0] >= 0) {
+        close(pair[0]);                          // the kernel keeps its own reference
+        if (stream_start(s, pair[1], speed, w->busid) < 0) {   // (closes both on failure)
+            logm("[%s] could not start the relay", w->busid);
+            detach_port(port);
+            return -1;
+        }
+    } else close(s);   // the kernel keeps its own reference to the connection
     w->port = port;
     w->was_attached = 1;
     w->quiet = 0;
