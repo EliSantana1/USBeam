@@ -68,6 +68,11 @@ static void *host_main(void *arg) {
             last_send = o->at;
             memmove(&pend[0], &pend[1], (np - 1) * sizeof pend[0]); np--;
             dev_next = (dev_next + 1000000ull > now ? dev_next : now) + 1000000ull;   // next report 1 ms later
+            if (np && pend[0].arrive <= now) {           // like some devices: an empty reply in between
+                Out *z = &q[(qh + qn++) % 65536];
+                memset(z->m, 0, 48); st_p32(z->m, 3); st_p32(z->m + 4, pend[0].seq); z->n = 48;
+                z->at = last_send; memmove(&pend[0], &pend[1], (np - 1) * sizeof pend[0]); np--;
+            }
         }
         while (qn && q[qh].at <= st_now()) { if (st_send(h->s, q[qh].m, (size_t)q[qh].n)) return NULL; qh = (qh + 1) % 65536; qn--; }
     }
@@ -87,15 +92,17 @@ static void run(const char *name, int use_relay, double *rate_out, double *p90_o
     uint8_t sub[48] = {0}, r[48], d[6];
     st_p32(sub, 1); st_p32(sub + 12, 1); st_p32(sub + 16, 1); st_p32(sub + 24, 6); st_p32(sub + 36, 1);   // interrupt IN, ep 1, 1 ms
     // first a control request (passes through the relay untouched) and a cancelled read
-    for (int i = 0; i < REPORTS; i++) {
-        st_p32(sub + 4, (uint32_t)(i + 1));
-        if (st_send(drv, sub, 48) || st_recv(drv, r, 48) || st_g32(r) != 3 || st_g32(r + 4) != (uint32_t)(i + 1)) { printf("%s: wrong reply\n", name); fails++; break; }
+    for (int i = 0, seq = 1; i < REPORTS; seq++) {
+        st_p32(sub + 4, (uint32_t)seq);
+        if (st_send(drv, sub, 48) || st_recv(drv, r, 48) || st_g32(r) != 3 || st_g32(r + 4) != (uint32_t)seq) { printf("%s: wrong reply\n", name); fails++; break; }
+        if (st_g32(r + 24) == 0) continue;                 // an empty reply: ask again
         if (st_g32(r + 24) != 6 || st_recv(drv, d, 6)) { bad_data++; break; }
         t[i] = st_now();
         uint32_t c = st_g32(d);
         if (c != expect) in_order = 0;
         expect = c + 1;
         if (d[4] != 2 || d[5] != 1) bad_data++;
+        i++;
     }
     double secs = (t[REPORTS - 1] - t[0]) / 1e9, gaps[REPORTS];
     for (int i = 1; i < REPORTS; i++) gaps[i - 1] = (t[i] - t[i - 1]) / 1e6;

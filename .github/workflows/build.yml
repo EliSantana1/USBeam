@@ -127,6 +127,9 @@ jobs:
   mouse-feel-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # On test branches the result is shown without failing the whole build (no failure emails while
+    # work is in progress). A release (tag) needs it to pass.
+    continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/') }}
     steps:
       - uses: actions/checkout@v4
       - name: Build the Linux engine

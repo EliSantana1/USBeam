@@ -25,7 +25,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define ST_AHEAD   32         // reads kept waiting on the other PC per endpoint (covers a 32 ms round trip at 1000 Hz)
+#define ST_AHEAD   64         // reads kept waiting on the other PC per endpoint (covers ~30 ms round trips, also for devices that send empty replies in between)
 #define ST_BUFMAX  128        // reports held here at most (then reading ahead pauses; nothing is dropped)
 #define ST_SEQBIT  0x80000000u  // this relay's own request numbers (the kernel's stay below)
 #define ST_MAXFWD  4096       // forwarded requests in flight (drives use many)
@@ -143,8 +143,11 @@ static uint64_t st_deliver(Stream *st, int e) {
     StEp *p = &st->ep[e];
     if (!p->waiting || !p->qn || st->dead) return 0;
     uint64_t now = st_now();
-    if (now < p->next_ns) { st->n_paced++; return p->next_ns - now; }
     StRep *r = &p->q[p->qh];
+    // Empty replies (some devices send them between reports) and a long queue (behind by more than
+    // ~16 reports) go at once: spacing out is only for smoothing small bursts.
+    int urgent = r->len == 0 || p->qn > 16;
+    if (!urgent && now < p->next_ns) { st->n_paced++; return p->next_ns - now; }
     p->qh = (p->qh + 1) % ST_BUFMAX; p->qn--;
     uint8_t h[48]; memcpy(h, r->hdr, 48);
     st_p32(h + 4, p->wait_seq);
@@ -154,7 +157,7 @@ static uint64_t st_deliver(Stream *st, int e) {
     uint8_t *data = r->data;
     p->waiting = 0; st->n_given++;
     // Several waiting: hand them over at ~1.33x the device's rate (smooth, and the delay drains).
-    p->next_ns = p->qn ? now + p->pace_ns : 0;
+    if (n) p->next_ns = p->qn ? now + p->pace_ns : 0;
     pthread_mutex_unlock(&st->mx);
     pthread_mutex_lock(&st->kern_mx);
     int bad = st_send(st->kern, h, 48) || (n && st_send(st->kern, data, n));
