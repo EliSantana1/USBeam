@@ -13,6 +13,8 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <stdarg.h>
+static void logm(const char *fmt, ...) { va_list a; va_start(a, fmt); vprintf(fmt, a); va_end(a); printf("\n"); }
 #include "../src/linux/stream.h"
 
 #define REPORTS 3000

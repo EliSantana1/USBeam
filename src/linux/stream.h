@@ -62,6 +62,8 @@ typedef struct {
     struct { uint32_t seq; uint8_t dir; uint8_t used; } fwd[ST_MAXFWD];   // kernel requests passed on
     struct { uint32_t seq, target; uint8_t used; } unl[64];               // kernel cancels passed on
     int refs;
+    // numbers for the log when the connection ends
+    uint64_t n_ahead, n_back, n_given, n_paced, n_stopped; int max_ahead, max_q;
 } Stream;
 
 static uint64_t st_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
@@ -86,6 +88,9 @@ static void st_unref(Stream *st) {
     int left = --st->refs;
     pthread_mutex_unlock(&st->mx);
     if (left) return;
+    logm("[%s] smooth input: %llu reads ahead sent, %llu answered, %llu reports handed over (%llu spaced out), stopped %llu times, most waiting there %d, most queued here %d",
+         st->busid, (unsigned long long)st->n_ahead, (unsigned long long)st->n_back, (unsigned long long)st->n_given,
+         (unsigned long long)st->n_paced, (unsigned long long)st->n_stopped, st->max_ahead, st->max_q);
     for (int e = 0; e < 16; e++) for (int i = 0; i < st->ep[e].qn; i++) free(st->ep[e].q[(st->ep[e].qh + i) % ST_BUFMAX].data);
     close(st->net); close(st->kern);
     pthread_mutex_destroy(&st->mx); pthread_mutex_destroy(&st->net_mx); pthread_mutex_destroy(&st->kern_mx); pthread_cond_destroy(&st->cv);
@@ -123,7 +128,8 @@ static void st_fill(Stream *st, int e) {
         if (!o) break;
         memcpy(h[n], p->sub, 48);
         st_p32(h[n] + 4, o->seq);
-        p->ahead++; n++;
+        p->ahead++; n++; st->n_ahead++;
+        if (p->ahead > st->max_ahead) st->max_ahead = p->ahead;
     }
     if (!n) return;
     pthread_mutex_unlock(&st->mx);
@@ -137,7 +143,7 @@ static uint64_t st_deliver(Stream *st, int e) {
     StEp *p = &st->ep[e];
     if (!p->waiting || !p->qn || st->dead) return 0;
     uint64_t now = st_now();
-    if (now < p->next_ns) return p->next_ns - now;
+    if (now < p->next_ns) { st->n_paced++; return p->next_ns - now; }
     StRep *r = &p->q[p->qh];
     p->qh = (p->qh + 1) % ST_BUFMAX; p->qn--;
     uint8_t h[48]; memcpy(h, r->hdr, 48);
@@ -146,7 +152,7 @@ static uint64_t st_deliver(Stream *st, int e) {
     if (n > p->len) n = p->len;
     st_p32(h + 24, n);
     uint8_t *data = r->data;
-    p->waiting = 0;
+    p->waiting = 0; st->n_given++;
     // Several waiting: hand them over at ~1.33x the device's rate (smooth, and the delay drains).
     p->next_ns = p->qn ? now + p->pace_ns : 0;
     pthread_mutex_unlock(&st->mx);
@@ -294,10 +300,12 @@ static void *st_down(void *arg) {
                     StEp *p = &st->ep[o->ep];
                     if (o->epoch == p->epoch && p->on) {
                         if (p->ahead > 0) p->ahead--;
+                        st->n_back++;
                         if (p->qn < ST_BUFMAX) {
                             StRep *r = &p->q[(p->qh + p->qn) % ST_BUFMAX];
                             memcpy(r->hdr, h, 48); r->len = actual; r->data = data; p->qn++; keep = 1;
-                            if ((int32_t)st_g32(h + 20) != 0) p->stopped = 1;   // an error: the kernel decides what next
+                            if ((int32_t)st_g32(h + 20) != 0) { p->stopped = 1; st->n_stopped++; }   // an error: the kernel decides what next
+                            if (p->qn > st->max_q) st->max_q = p->qn;
                         }
                         st_fill(st, o->ep);
                         st_deliver(st, o->ep);

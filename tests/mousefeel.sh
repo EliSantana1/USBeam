@@ -105,9 +105,9 @@ run() {   # $1 = label, $2 = 1 for the old way
     sleep 1
     timeout 60 python3 tests/mousefeel.py move "$N" || echo "(the virtual mouse could not send all its reports within 60 s)"
     wait $m
-    echo "--- what USBeam said on this side:"; tail -5 "$LOG/use-$old"
     cat "$LOG/result-$old"
     pkill -f "build/usbeam use 10.77.0.2"; sleep 3
+    grep -h "smooth input" "$LOG/use-$old"
 }
 run "old way (one report per round trip)" 1
 run "new way (streamed)                 " 0
