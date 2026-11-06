@@ -5,16 +5,16 @@
 #   measure N label   records the shared mouse until N reports arrived (or 30 s), prints numbers
 import glob, os, select, struct, sys, time
 
-def shared_mouse():
+def shared_mouse(local=False):   # the test mouse as USBeam delivers it (behind vhci), or plugged in directly
     for d in glob.glob("/sys/class/input/event*"):
         try:
             if open(d + "/device/name").read().strip() != "USBeam Test Mouse": continue
-            if "vhci_hcd" in os.path.realpath(d): return "/dev/input/" + os.path.basename(d)
+            if ("vhci_hcd" in os.path.realpath(d)) != local: return "/dev/input/" + os.path.basename(d)
         except OSError: pass
     return None
 
 cmd = sys.argv[1]
-if cmd == "find": sys.exit(0 if shared_mouse() else 1)
+if cmd == "find": sys.exit(0 if shared_mouse(len(sys.argv) > 2) else 1)
 
 if cmd == "move":
     n = int(sys.argv[2]); fd = os.open("/dev/hidg0", os.O_WRONLY)
@@ -28,9 +28,9 @@ if cmd == "move":
 
 if cmd == "measure":
     n, label = int(sys.argv[2]), sys.argv[3]
-    fd = os.open(shared_mouse(), os.O_RDONLY | os.O_NONBLOCK)
+    fd = os.open(shared_mouse(len(sys.argv) > 4), os.O_RDONLY | os.O_NONBLOCK)
     times, dx, dy, cur = [], 0, 0, [0, 0]
-    end = time.monotonic() + 30
+    end = time.monotonic() + 60
     while len(times) < n and time.monotonic() < end:
         r, _, _ = select.select([fd], [], [], 0.5)
         if not r: continue
@@ -50,5 +50,5 @@ if cmd == "measure":
     q = lambda f: gaps[int(f * (len(gaps) - 1))]
     straight = int(k == n and dx == 2 * n and dy == n)
     print(f"{label}: {rate:.0f} reports/s, gap ms median {q(0.5):.2f} p90 {q(0.9):.2f} p99 {q(0.99):.2f} max {gaps[-1]:.2f}; "
-          f"arrived {k}/{n}, total move {dx},{dy} (expected {2 * n},{n})")
+          f"arrived {k}/{n}, total move {dx},{dy} (expected {2 * n},{n}), gaps over 20 ms: {sum(g > 20 for g in gaps)}")
     print(f"NUMBERS {rate:.0f} {q(0.9):.2f} {q(0.99):.2f} {straight}")

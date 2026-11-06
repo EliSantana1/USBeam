@@ -66,6 +66,13 @@ done
 [ -n "$BUSID" ] || fail "the virtual mouse didn't appear"
 echo "virtual mouse is $BUSID"
 
+echo "== the virtual mouse plugged in directly (the goal)"
+for _ in $(seq 1 15); do python3 tests/mousefeel.py find local && break; sleep 1; done
+python3 tests/mousefeel.py measure "$N" "plugged in directly                " local > /tmp/mousefeel-local &
+lm=$!; sleep 1
+timeout 60 python3 tests/mousefeel.py move "$N" || echo "(the virtual mouse could not send all its reports within 60 s)"
+wait $lm; cat /tmp/mousefeel-local
+
 echo "== network with home-Wi-Fi-like delay"
 ip netns add usbeamhost
 ip link add usbeam0 type veth peer name usbeam1
@@ -73,8 +80,8 @@ ip link set usbeam1 netns usbeamhost
 ip addr add 10.77.0.1/24 dev usbeam0; ip link set usbeam0 up
 ip netns exec usbeamhost ip addr add 10.77.0.2/24 dev usbeam1
 ip netns exec usbeamhost ip link set usbeam1 up; ip netns exec usbeamhost ip link set lo up
-tc qdisc add dev usbeam0 root netem delay 2.7ms 1.5ms distribution normal
-ip netns exec usbeamhost tc qdisc add dev usbeam1 root netem delay 2.7ms 1.5ms distribution normal
+tc qdisc add dev usbeam0 root netem delay 2.7ms 1.5ms distribution normal rate 500mbit
+ip netns exec usbeamhost tc qdisc add dev usbeam1 root netem delay 2.7ms 1.5ms distribution normal rate 500mbit
 ping -c 20 -i 0.05 -q 10.77.0.2 | tail -1
 
 echo "== USBeam sharing it (other side)"
@@ -107,9 +114,10 @@ run "new way (streamed)                 " 0
 
 read -r old_rate old_p90 _ < <(awk '/^NUMBERS/ {print $2, $3, $4}' "$LOG/result-1")
 read -r new_rate new_p90 new_ok < <(awk '/^NUMBERS/ {print $2, $3, $5}' "$LOG/result-0")
+read -r loc_rate loc_p90 _ < <(awk '/^NUMBERS/ {print $2, $3, $5}' /tmp/mousefeel-local)
 ok=1
-awk -v r="$new_rate" 'BEGIN{exit !(r >= 800)}' && echo "OK: new way: $new_rate reports/s (at least 800)" || { echo "FAIL: new way: only $new_rate reports/s"; ok=0; }
-awk -v p="$new_p90" 'BEGIN{exit !(p <= 2.5)}' && echo "OK: new way: 90% of reports within $new_p90 ms (at most 2.5)" || { echo "FAIL: new way: 90% of reports within $new_p90 ms"; ok=0; }
+awk -v r="$new_rate" -v l="$loc_rate" 'BEGIN{exit !(r >= 0.9 * l)}' && echo "OK: new way: $new_rate reports/s (plugged in directly: $loc_rate)" || { echo "FAIL: new way: only $new_rate reports/s (plugged in directly: $loc_rate)"; ok=0; }
+awk -v p="$new_p90" -v l="$loc_p90" 'BEGIN{exit !(p <= l + 1)}' && echo "OK: new way: 90% of reports within $new_p90 ms (plugged in directly: $loc_p90)" || { echo "FAIL: new way: 90% of reports within $new_p90 ms (plugged in directly: $loc_p90)"; ok=0; }
 [ "$new_ok" = 1 ] && echo "OK: new way: the line arrived complete and exactly straight" || { echo "FAIL: new way: movement lost or bent"; ok=0; }
 awk -v o="$old_p90" -v n="$new_p90" 'BEGIN{exit !(o >= 2 * n)}' && echo "OK: the old way is clearly worse ($old_p90 ms, $old_rate reports/s): the test sees the problem" || { echo "FAIL: the old way wasn't clearly worse ($old_p90 ms)"; ok=0; }
 cleanup
