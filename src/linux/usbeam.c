@@ -30,6 +30,9 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
+#include <pthread.h>
 
 #define USBIP_PORT 3240
 #define USBIP_VERSION 0x0111

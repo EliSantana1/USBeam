@@ -58,10 +58,6 @@ static struct {
 static struct { char ip[64], busid[32]; unsigned long long until; } g_permit[16];
 static int g_permit_next;
 
-typedef struct { int id; char pc[40], busid[32], from[64]; } PairNotice;
-static PairNotice g_nt[4];
-static int g_nt_next = 1;
-
 // ---------------------------------------------------------------- small helpers
 static void pr_fixed(uint8_t *dst, const char *s, size_t n) {   // zero-padded field
     memset(dst, 0, n);
@@ -287,23 +283,12 @@ static int pr_permitted(const char *ip, const char *busid) {
 // "Only paired PCs can use my devices": a device may be connected only right after a paired PC asked for it.
 static int pair_import_ok(const char *ip, const char *busid) { return !g_paired_only || pr_permitted(ip, busid); }
 static int pair_kick_ok(const char *ip) { return !g_paired_only || pr_permitted(ip, NULL); }
-static void pair_notice(const char *pc, const char *busid, const char *from) {
-    pr_lock();
-    int k = 0;
-    for (int i = 1; i < 4; i++) if (g_nt[i].id < g_nt[k].id) k = i;    // replace the oldest
-    g_nt[k].id = g_nt_next++;
-    snprintf(g_nt[k].pc, sizeof g_nt[k].pc, "%.39s", pc);
-    snprintf(g_nt[k].busid, sizeof g_nt[k].busid, "%.31s", busid);
-    snprintf(g_nt[k].from, sizeof g_nt[k].from, "%s", from);
-    pr_unlock();
-}
 static void pair_reset(void) {                 // part of "Reset USBeam"
     pr_lock();
     crypto_wipe(g_pr, sizeof g_pr);
     pr_end_b(); pr_end_a();
     g_pm.open_until = 0; g_pm.msg[0] = 0;
     memset(g_permit, 0, sizeof g_permit);
-    memset(g_nt, 0, sizeof g_nt);
     pr_unlock();
     g_paired_only = 0;
     pair_save();
@@ -416,7 +401,6 @@ static int pr_on_give(const char *peer, const char *id, const char *from, const 
     }
     cl_unlock();
     if (!u) { snprintf(msg, mn, "This PC can't take more devices right now."); return 3; }
-    pair_notice(id, busid, from);
     logm("[%s] %s gave this device to this PC", busid, from);
     return 0;
 }
@@ -706,13 +690,6 @@ static int pair_action(const char *op, const char *body, sb_t *out, int *code) {
         client_save();
         return 1;
     }
-    if (!strcmp(op, "notice_ok")) {
-        int id = atoi(val);
-        pr_lock();
-        for (int i = 0; i < 4; i++) if (g_nt[i].id == id) memset(&g_nt[i], 0, sizeof g_nt[i]);
-        pr_unlock();
-        return 1;
-    }
     if (!strcmp(op, "give")) {                       // give one of this PC's devices to a paired PC
         char ip[64], name[64], msg[160];
         if (!busid[0]) return pr_err(out, code, "No device chosen.");
@@ -752,19 +729,7 @@ static void pair_json(sb_t *j) {
         sb_printf(j, ",\"when\":%lld}", p->when);
     }
     sb_add(j, "]", 1);
-    sb_printf(j, ",\"paired_only\":%s,\"notices\":[", g_paired_only ? "true" : "false");
-    first = 1;
-    for (int i = 0; i < 4; i++) {
-        PairNotice *n = &g_nt[i];
-        if (!n->id) continue;
-        if (!first) sb_add(j, ",", 1);
-        first = 0;
-        sb_printf(j, "{\"id\":%d,\"pc\":", n->id); sb_jstr(j, n->pc);
-        sb_add(j, ",\"busid\":", 9); sb_jstr(j, n->busid);
-        sb_add(j, ",\"from\":", 8); sb_jstr(j, n->from);
-        sb_add(j, "}", 1);
-    }
-    sb_add(j, "]", 1);
+    sb_printf(j, ",\"paired_only\":%s", g_paired_only ? "true" : "false");
     pr_unlock();
 }
 

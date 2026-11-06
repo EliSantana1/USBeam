@@ -148,7 +148,6 @@ static void run_b(int in, int out) {
             pr_unlock();
         }
         else if (!strcmp(cmd, "given")) { cl_lock(); Use *u = use_find("id-a", arg); snprintf(rep, sizeof rep, "%d", u && u->used && u->want && u->give_until); cl_unlock(); }
-        else if (!strcmp(cmd, "notices")) { pr_lock(); int n = 0; for (int i = 0; i < 4; i++) if (g_nt[i].id) n++; snprintf(rep, sizeof rep, "%d", n); pr_unlock(); }
         else if (!strcmp(cmd, "pairedonly")) g_paired_only = atoi(arg);
         else if (!strcmp(cmd, "importok")) snprintf(rep, sizeof rep, "%d", pair_import_ok("10.0.0.1", arg));
         else if (!strcmp(cmd, "kickok")) snprintf(rep, sizeof rep, "%d", pair_kick_ok(arg[0] ? arg : "10.0.0.1"));
@@ -251,7 +250,6 @@ int main(void) {
     snprintf(body, sizeof body, "\"pc\":\"id-b\",\"busid\":\"1-3\"");
     check(act("give", body) == 200, "PC-A gives device 1-3 to PC-B");
     check(!strcmp(b("given 1-3"), "1"), "PC-B is connecting it (no prompt needed)");
-    check(!strcmp(b("notices"), "1"), "PC-B shows a notice about it");
     pr_lock(); pa = pr_find("id-b"); pa->key[5] ^= 1; pr_unlock();
     snprintf(body, sizeof body, "\"pc\":\"id-b\",\"busid\":\"1-4\"");
     check(act("give", body) == 400 && !strcmp(b("given 1-4"), "0"), "a wrong key is refused");

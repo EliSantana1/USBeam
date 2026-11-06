@@ -175,6 +175,18 @@ static const char *dev_name(const char *busid, char *buf, size_t n) {
 }
 
 // ---------------------------------------------------------------- bind / return
+// A USB reset right before a device goes to another PC. Without it, a device that was busy sending
+// data at that moment (a mouse being moved, for example while clicking "Give to" with it) can keep
+// one of its channels stuck: on the other PC its movement never arrives while its buttons work.
+// The reset starts every channel clean, on the device and on this PC. Its normal driver is already
+// detached here, so nothing on this PC is using it.
+static void usb_reset_now(const char *busid) {
+    char node[64];
+    snprintf(node, sizeof node, "/dev/bus/usb/%03u/%03u", attr_dec(busid, "busnum"), attr_dec(busid, "devnum"));
+    int fd = open(node, O_WRONLY | O_CLOEXEC);
+    if (fd < 0 || ioctl(fd, USBDEVFS_RESET, 0) != 0) logm("[%s] USB reset before handing it over failed: %s", busid, strerror(errno));
+    if (fd >= 0) close(fd);
+}
 static int stub_bind(const char *busid) {
     char p[PATH_MAX], v[64];
     if (is_system_drive_now(busid)) { logm("[%s] refused: holds the running system", busid); return -1; }
@@ -182,6 +194,7 @@ static int stub_bind(const char *busid) {
     if (write_sysfs(STUB "/match_busid", v) < 0) { logm("[%s] match_busid add failed: %s", busid, strerror(errno)); return -1; }
     snprintf(p, sizeof p, USBDEV "/%s/driver/unbind", busid);
     write_sysfs(p, busid);                         // detach from its normal driver (if any)
+    usb_reset_now(busid);                          // hand it over clean (see usb_reset_now)
     if (write_sysfs(STUB "/bind", busid) < 0) {
         logm("[%s] bind to usbip-host failed: %s", busid, strerror(errno));
         snprintf(v, sizeof v, "del %s", busid); write_sysfs(STUB "/match_busid", v);
