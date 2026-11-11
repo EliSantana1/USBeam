@@ -247,7 +247,14 @@ static void classify_walk(DEVINST di, int depth, int *net, int *stor) {
     len = sizeof buf; buf[0] = 0;
     if (CM_Get_DevNode_Registry_PropertyW(di, CM_DRP_CLASSGUID, NULL, buf, &len, 0) == CR_SUCCESS) {
         if (!_wcsicmp(buf, NET_CLASS)) *net = 1;
-        if (!_wcsicmp(buf, BT_CLASS)) { *stor = 1; g_radio_flag = 1; }
+        if (!_wcsicmp(buf, BT_CLASS)) {
+            *stor = 1; g_radio_flag = 1;
+            // Below a Bluetooth radio Windows adds Bluetooth services, not hardware: among them
+            // "Bluetooth Device (Personal Area Network)", filed under network adapters. That must
+            // not make a Bluetooth dongle a network adapter (a Wi-Fi + Bluetooth combo dongle still
+            // is one: its Wi-Fi part sits beside the radio, not below it).
+            return;
+        }
     }
     len = sizeof buf; buf[0] = 0;
     if (CM_Get_DevNode_Registry_PropertyW(di, CM_DRP_SERVICE, NULL, buf, &len, 0) == CR_SUCCESS &&
