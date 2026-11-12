@@ -30,7 +30,12 @@ cleanup() {
     ip netns del usbeamrs 2>/dev/null
     if [ -d $G ]; then echo "" > $G/UDC 2>/dev/null; rm -f $G/configs/c.1/hid.usb0; rmdir $G/configs/c.1/strings/0x409 $G/configs/c.1 $G/functions/hid.usb0 $G/strings/0x409 $G 2>/dev/null; fi
 }
-fail() { echo "FAIL: $*"; cat "$LOG/host" 2>/dev/null | tail -40; cleanup; exit 1; }
+fail() {
+    echo "FAIL: $*"; tail -n 20 "$LOG/host" 2>/dev/null
+    echo "--- driver: $(readlink "/sys/bus/usb/devices/${BUSID:-x}/driver" 2>/dev/null); usbip-host table: $(tr '\n' ' ' < /sys/bus/usb/drivers/usbip-host/match_busid 2>/dev/null)"
+    dmesg | tail -n 25
+    cleanup; exit 1
+}
 
 echo "== kernel parts"
 if [ ! -d /sys/module/dummy_hcd ] && ! modprobe dummy_hcd 2>/dev/null; then
@@ -50,6 +55,7 @@ done
 mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
 
 echo "== virtual device"
+uses_before=$(dmesg | grep -c "USBeam Test Mouse\] on usb-dummy_hcd")
 mkdir -p $G && cd $G || fail "no USB gadget support"
 echo 0x1d6b > idVendor; echo 0x0104 > idProduct; echo 0x0200 > bcdUSB
 mkdir -p strings/0x409; echo USBeam > strings/0x409/manufacturer; echo "Test Mouse" > strings/0x409/product; echo 1 > strings/0x409/serialnumber
@@ -76,7 +82,8 @@ in_log() { grep -q "$1" "$LOG/host"; }
 local_uses() { dmesg | grep -c "USBeam Test Mouse\] on usb-dummy_hcd"; }   # times its own side's driver took it
 
 wait_for here 15
-check '[ "$(local_uses)" -ge 1 ]' "the test can see when its own side's driver takes it"
+seen_locally() { [ "$(local_uses)" -gt "$uses_before" ]; }
+check seen_locally "the test can see when its own side's driver takes it"
 
 echo "== USBeam sharing it (other side)"
 ip netns add usbeamrs

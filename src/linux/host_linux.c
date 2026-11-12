@@ -210,7 +210,12 @@ static int stub_bind(const char *busid) {
     write_sysfs(p, busid);                         // detach from its normal driver (if any)
     usb_reset_now(busid);                          // hand it over clean (see usb_reset_now)
     if (write_sysfs(STUB "/bind", busid) < 0) {
-        logm("[%s] bind to usbip-host failed: %s", busid, strerror(errno));
+        int e = errno;
+        char dl[PATH_MAX] = "", dp[PATH_MAX];
+        snprintf(dp, sizeof dp, USBDEV "/%s/driver", busid);
+        ssize_t n = readlink(dp, dl, sizeof dl - 1);
+        if (n > 0) dl[n] = 0;
+        logm("[%s] bind to usbip-host failed: %s (driver now: %s)", busid, strerror(e), n > 0 ? (strrchr(dl, '/') ? strrchr(dl, '/') + 1 : dl) : "none");
         snprintf(v, sizeof v, "del %s", busid); write_sysfs(STUB "/match_busid", v);
         write_sysfs("/sys/bus/usb/drivers_probe", busid);
         return -1;
