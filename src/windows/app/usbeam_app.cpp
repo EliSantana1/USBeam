@@ -318,6 +318,16 @@ static void app_link(const std::wstring &uri) {
         report(L"Uninstalling… Windows will ask for permission.");
         if (!ShellExecuteExW(&se)) report(L"Uninstall was cancelled.");
         else g_quitting = true;          // the uninstaller closes this app
+    } else if (what == L"notify") {                   // a new version (the page checks): a notification; clicking it opens USBeam
+        std::wstring v = param(uri, L"version");
+        if (v.empty() || v.size() > 15) return;
+        for (wchar_t c : v) if (!iswdigit(c) && c != L'.') return;
+        NOTIFYICONDATAW n = g_nid;
+        n.uFlags = NIF_INFO;
+        swprintf(n.szInfoTitle, ARRAYSIZE(n.szInfoTitle), L"USBeam %ls is available", v.c_str());
+        wcscpy(n.szInfo, L"Click to update, or to skip this version.");
+        n.dwInfoFlags = NIIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY, &n);
     } else if (what == L"quit") {                     // confirmed in the page when a device is in use
         PostMessageW(g_hwnd, WM_QUIT_APP, 0, 0);      // after this navigation event, not inside it
     }
@@ -445,7 +455,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TRAY:
-        if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT) show_window();
+        if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT || LOWORD(lp) == NIN_BALLOONUSERCLICK) show_window();
         else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
             HMENU m = CreatePopupMenu();
             AppendMenuW(m, MF_STRING, 1, L"Open USBeam");

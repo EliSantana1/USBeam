@@ -212,6 +212,7 @@ h2.sub { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 
 <main>
   <div class="wrap">
     <div id="banner" role="alert"></div>
+    <div id="updbar" class="netnote" role="status" hidden></div>
     <section id="view-net">
       <p class="hint" id="nethint" hidden></p>
       <div id="netnotes"></div>
@@ -315,6 +316,7 @@ function showSecurity() {
     <p>USBeam only works on networks you allow: on Windows, networks marked Private; on Linux, networks you allowed; and ZeroTier and Tailscale, which are always on.</p>
     <p>Pairing (gear menu → Pair a PC) makes two PCs trust each other with a one-time 6-digit code. Paired PCs can give each other devices, and with "Only paired PCs can use my devices" other PCs can't connect this PC's devices at all. Pairing is kept through updates.</p>
     <p>Device data travels between PCs using USB/IP, the standard USBeam is built on. It is not encrypted by USBeam itself. On your own home network that's normally fine. ZeroTier and Tailscale encrypt everything they carry, so when you're away from home, connecting over them keeps device data private.</p>
+    <p>Bluetooth adapters: between Linux PCs paired with each other, an adapter's pairings (headphones, mice and so on) go with it, so devices paired once connect on whichever of those PCs has the adapter. The pairings travel encrypted with the two PCs' pair key. This can't work with Windows PCs: Windows runs only one Bluetooth adapter at a time and keeps pairings in a way other programs can't safely use, so it won't come to Windows.</p>
     <div class="acts"><button class="btn primary" onclick="closeModal()">Close</button></div>`);
 }
 document.addEventListener('change', e => {
@@ -345,7 +347,10 @@ function remoteRow(pc, d) {
   else if (d.state === 'available') btn = `<button class="btn primary" data-pre="${d.input ? 'input' : ''}" data-act="${attr(Object.assign({ op: 'use' }, key, info))}">Use</button>`;
   else if (d.state === 'busy') btn = `<button class="btn" data-pre="kick" data-act="${attr(Object.assign({ op: 'kick' }, key, info))}" title="Release it from the PC using it">Release</button>`;
   const locked = (d.state === 'busy' || d.state === 'drive_busy') && !d.auto;   // only the PC using it decides (unticking stays possible)
-  const sub = [d.vid && d.pid ? d.vid + ':' + d.pid : '', d.busid].filter(Boolean).join(' · ');
+  // A Bluetooth adapter's pairings come along only between Linux PCs paired in USBeam.
+  const btnote = !d.bt ? '' : d.btsync ? (pc.paired ? 'its Bluetooth pairings come along' : 'to bring its Bluetooth pairings along, pair the two PCs (gear menu → Pair a PC)')
+    : S.os === 'windows' ? "its Bluetooth pairings don't come to Windows PCs (Windows can't take them)" : "its Bluetooth pairings stay on its PC (Windows can't share them)";
+  const sub = [d.vid && d.pid ? d.vid + ':' + d.pid : '', d.busid, btnote].filter(Boolean).join(' · ');
   return `<div class="row"><div class="dicon">${ICON}</div>
     <div class="dinfo"><div class="dname">${esc(d.name || 'USB device')}</div><div class="dsub">${esc(sub)}</div>${d.error ? `<div class="derr" role="status">${esc(d.error)}</div>` : ''}</div>
     <span class="pill ${kind}" title="${esc(label)}">${esc(label)}</span>
@@ -630,6 +635,40 @@ async function checkUpdates() {
     };
   } catch (e) { updStatus("Couldn't check for updates. Is this PC online?"); }
 }
+// Update notices: the app keeps this page loaded (also in the tray), so it checks for a new version
+// when it opens and once a day. A new version shows a bar here and, once a day, a notification from
+// the app. "Skip this version" silences that version; the next newer one is announced again.
+let updLast = { ver: '', at: 0 };
+async function autoUpdates() {
+  if (!S || !S.version || S.install === 'package') return;
+  try {
+    const r = await fetch('https://api.github.com/repos/EliSantana1/USBeam/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
+    if (!r.ok) return;
+    const j = await r.json();
+    const latest = String(j.tag_name || '').replace(/^v/, '');
+    const bar = document.getElementById('updbar');
+    const skipped = S.prefs && S.prefs.skip_version === latest;
+    const pat = S.os === 'windows' ? /^USBeam-Setup-.*\.exe$/ : (S.arch === 'aarch64' ? /-aarch64\.AppImage$/ : /-x86_64\.AppImage$/);
+    const a = (j.assets || []).find(x => pat.test(x.name));
+    if (!/^[0-9.]+$/.test(latest) || !newer(latest, S.version) || skipped || !a) { bar.hidden = true; return; }
+    bar.innerHTML = `<div class="txt"><b>USBeam ${esc(latest)} is available</b><div>You have ${esc(S.version)}.</div></div>
+      <div class="acts"><button class="btn" id="updskip">Skip this version</button><button class="btn primary" id="updnow">Update now</button></div>`;
+    bar.hidden = false;
+    document.getElementById('updnow').onclick = () => {
+      bar.innerHTML = `<div class="txt"><b>Downloading USBeam ${esc(latest)}…</b></div>`;
+      appLink('update', { url: a.browser_download_url, sha256: String(a.digest || '').replace(/^sha256:/, ''), version: latest });
+    };
+    document.getElementById('updskip').onclick = async () => {
+      bar.hidden = true;
+      await act({ op: 'skip_version', value: latest });
+    };
+    const now = Date.now();
+    if (updLast.ver !== latest || now - updLast.at > 23 * 3600 * 1000) {      // a notification once a day at most
+      updLast = { ver: latest, at: now };
+      appLink('notify', { version: latest });
+    }
+  } catch (e) {}
+}
 function modal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modalbg').style.display = 'flex'; }
 function closeModal() {
   document.getElementById('modalbg').style.display = 'none';
@@ -851,6 +890,8 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 1000);
+setTimeout(autoUpdates, 20000);                 // once USBeam has settled after starting
+setInterval(autoUpdates, 6 * 3600 * 1000);
 </script>
 </body>
 </html>

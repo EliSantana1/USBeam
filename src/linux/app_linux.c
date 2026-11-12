@@ -156,6 +156,11 @@ static char g_driver_note[256];
 static const char *plat_client_note(void) { return g_have_vhci ? NULL : g_driver_note; }
 static void plat_tune(void) { tune_drives(); }
 
+// Bluetooth pairings that go with a Bluetooth adapter (btkeys.h, after pair.h).
+static void plat_bt_before(const char *pc, const char *ip, const char *busid, int again);
+static void plat_bt_after(const char *pc, const char *busid);
+static void plat_bt_tick(void);
+#define PLAT_BT_SYNC 1                 // this PC can take a Bluetooth adapter's pairings
 #include "../common/client.h"
 
 // ---------------------------------------------------------------- pairing (pair.h)
@@ -205,6 +210,7 @@ static int plat_secret_read(char *buf, size_t max) {
     return (int)got;
 }
 #include "../common/pair.h"
+#include "btkeys.h"
 
 // ---------------------------------------------------------------- which networks USBeam may be used on
 // Linux has no shared idea of "home" vs "public" networks, so USBeam asks once per network
@@ -369,6 +375,7 @@ static void save_settings(void) {
     for (int i = 0; i < MAXTRUST; i++) if (g_trust_id[i][0]) fprintf(f, "trustnet %s\t%s\n", g_trust_id[i], g_trust_name[i]);
     pthread_mutex_unlock(&g_trust_mx);
     netapp_save_lines(f);
+    bt_save_lines(f);
     cl_lock();
     client_save_lines(f);
     cl_unlock();
@@ -389,6 +396,7 @@ static void load_settings(void) {
             char tid[96] = "", tname[96] = "";
             if (sscanf(line + 9, "%95[^\t\n]\t%95[^\n]", tid, tname) >= 1) set_trusted(tid, tname, 1);
         }
+        else if (bt_load_line(line)) {}
         else if (!netapp_load_line(line)) client_load_line(line);
     }
     fclose(f);
@@ -398,7 +406,7 @@ static void load_settings(void) {
 static void host_state(const char *busid, const char **state, const char **peer, int *countdown) {
     HostDev *h = hdev(busid, 0);
     *peer = ""; *countdown = 0;
-    if (h && (h->exported || host_held(h))) { *state = "in_use"; *peer = h->peer; }   // held: restarting for that PC
+    if (h && (h->exported || host_held(h) || h->bt_wait_until)) { *state = "in_use"; *peer = h->peer; }   // held: restarting for that PC, or its pairings coming back
     else if (h && h->hold_until) { *state = "countdown"; *countdown = (int)(h->hold_until - time(NULL)); if (*countdown < 0) *countdown = 0; }
     else if (h && h->blocked) *state = "kept";
     else *state = "available";
@@ -437,6 +445,7 @@ static void handle_info(int s) {
         sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", attr_hex(ids[i], "idVendor"), attr_hex(ids[i], "idProduct"), st, cd, is_input_dev(ids[i]) ? "true" : "false");
         sb_jstr(&j, peer);
         { HostDev *th = hdev(ids[i], 0); sb_add(&j, ",\"taken_from\":", 14); sb_jstr(&j, th ? th->taken_from : ""); }
+        if (is_bt_adapter(ids[i])) sb_printf(&j, ",\"bt\":true,\"btsync\":%s", bt_have_bluez() ? "true" : "false");   // its pairings can come along (btkeys.h)
         sb_add(&j, "}", 1);
     }
     sb_add(&j, "]}", 2);
@@ -464,11 +473,11 @@ static void handle_kick(int s, const char *peer, const uint8_t *op) {
         return;
     }
     HostDev *h = is_system_drive(busid) ? NULL : hdev(busid, 0);
-    if (!h || !(h->exported || host_held(h))) { put32b(r + 4, 1); send_all(s, r, 8); return; }
+    if (!h || !(h->exported || host_held(h))) { put32b(r + 4, 1); send_all(s, r, 8); return; }   // (waiting for pairings: it's let go already)
     char name[256], pl[160], by[160];
     peer_label(h->peer, pl, sizeof pl, 0);
     peer_label(peer, by, sizeof by, 0);
-    if (host_held(h)) host_end_hold(h); else return_to_host(busid);
+    if (host_held(h)) host_end_hold(h); else if (h->exported) host_let_go(h);
     h->exported = 0; h->blocked = 1; h->hold_until = time(NULL) + g_hold_secs; h->last_shown = 0;
     logm("[%s] %s released from %s at the request of %s. It works on this PC again; other PCs may take it again in %d s.",
          busid, dev_name(busid, name, sizeof name), pl, by, g_hold_secs);
@@ -646,6 +655,7 @@ static void add_local_json(sb_t *j) {
         if (strcmp(st, "in_use") && drive_mounted(ids[i])) { st = "hidden"; note = "drive in use by this PC, not shared"; fixed = 1; }
         else if (strcmp(st, "in_use") && is_hidden(ids[i])) st = "hidden";
         else if (strcmp(st, "in_use") && why && !is_shared(ids[i])) { st = "hidden"; sys = 1; snprintf(nb, sizeof nb, "%s: shared only if you choose Share", why); note = nb; }
+        else if (is_bt_adapter(ids[i]) && bt_have_bluez()) note = BT_NOTE_LINUX;
         if (i) sb_add(j, ",", 1);
         sb_add(j, "{\"id\":", 6); sb_jstr(j, ids[i]);
         sb_add(j, ",\"name\":", 8); sb_jstr(j, dev_name(ids[i], name, sizeof name));
@@ -778,7 +788,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         // so its Auto-reconnect doesn't take it straight back.
         // (If that PC isn't known by its USBeam id, it's kept here instead, as before.)
         if (h && (h->exported || host_held(h))) {
-            if (host_held(h)) host_end_hold(h); else return_to_host(id);
+            if (host_held(h)) host_end_hold(h); else host_let_go(h);
             h->exported = 0;
             id_of_ip(h->peer, h->taken_from, sizeof h->taken_from);
             if (!h->taken_from[0]) h->blocked = 1;
@@ -889,6 +899,7 @@ static void *host_main(void *arg) {
                     else if (code == OP_REQ_HELLO) handle_hello(s, peer, op);
                     else if (code == OP_REQ_KICK) handle_kick(s, peer, op);
                     else if (pair_server(s, peer, code, op)) {}
+                    else if (code == OP_REQ_BT) bt_server(s, peer, op);
                     else if (code == OP_REQ_IMPORT) {
                         handle_import(s, peer);
                         struct timeval z = {0, 0};      // the kernel uses this connection now: no time limits
@@ -902,6 +913,7 @@ static void *host_main(void *arg) {
         }
         time_t now = time(NULL);
         if (now != last_tick) { last_tick = now; host_lock(); host_tick(); host_unlock(); }
+        if (g_bt_hostdirty) { g_bt_hostdirty = 0; save_settings(); }   // an adapter's pairings went out or came back (btkeys.h)
     }
     return NULL;
 }

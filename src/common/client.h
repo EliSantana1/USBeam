@@ -46,7 +46,7 @@
 #include "client_types.h"
 static const char *NET_KEY[] = { "auto", "home", "zerotier", "tailscale" };
 static const char *NET_LABEL[] = { "Automatic", "Home network", "ZeroTier", "Tailscale" };
-typedef struct { char busid[32], name[128], vid[8], pid[8], state[16], peer[64], taken[40]; int countdown, input; } RDev;
+typedef struct { char busid[32], name[128], vid[8], pid[8], state[16], peer[64], taken[40]; int countdown, input, bt, btsync; } RDev;
 typedef struct { char ip[64]; int kind, ok; } RAddr;
 typedef struct {
     char id[40], name[64];
@@ -296,6 +296,8 @@ static int poll_pc(const char *ip, PollResult *out, int ms) {
             const char *c = json_find(obj, "countdown"); d->countdown = c ? atoi(c) : 0;
             d->input = json_bool(obj, "input");
             json_str(obj, "taken_from", d->taken, sizeof d->taken);
+            d->bt = json_bool(obj, "bt");              // a Bluetooth adapter
+            d->btsync = json_bool(obj, "btsync");      // whose pairings can come along (a Linux PC; btkeys.h)
             p = e + 1;
         }
         free(js);
@@ -439,6 +441,7 @@ static void client_tick(void) {
         if (hello) send_hello(ips[i]);     // let it know this PC exists too (if its announcements never reach us)
     }
     if (g_cl_dirty) { g_cl_dirty = 0; client_save(); }
+    plat_bt_tick();                              // Bluetooth pairings due back to their PC (btkeys.h)
     // 2. Devices used here: keep attached, release, retry.
     int any = 0;
     cl_lock();
@@ -478,6 +481,7 @@ static void client_tick(void) {
         if (u.release) {
             if (u.port >= 0) plat_detach(u.port);
             plat_stop_retries();
+            plat_bt_after(u.pc, u.busid);
             logm("[%s] released", u.busid);
             cl_lock(); g_use[i].used = 0; cl_unlock();
             changed = 1;
@@ -489,6 +493,7 @@ static void client_tick(void) {
             logm("[%s] released automatically after %d minutes (keyboards and mice)", u.busid, g_input_release);
             plat_detach(u.port);
             plat_stop_retries();
+            plat_bt_after(u.pc, u.busid);
             cl_lock(); g_use[i].used = 0; cl_unlock();
             changed = 1;
             continue;
@@ -502,6 +507,7 @@ static void client_tick(void) {
             // (Take back, unplugged), it isn't offered to this PC and the retries simply stop.
             int restarted = u.attached_at && now - u.attached_at <= 12000 && u.restarts < RESTART_TRIES;
             logm(restarted ? "[%s] connection ended right after connecting (the device restarted?): connecting it again" : "[%s] connection ended", u.busid);
+            if (!restarted) plat_bt_after(u.pc, u.busid);   // (restarted: it comes back here, pairings and all)
             cl_lock();
             g_use[i].port = -1; g_use[i].ended_at = now;
             if (restarted) {
@@ -521,6 +527,7 @@ static void client_tick(void) {
                 if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
             }
             cl_unlock();
+            plat_bt_after(u.pc, u.busid);
             logm("[%s] didn't come back after restarting", u.busid);
             continue;
         }
@@ -540,11 +547,12 @@ static void client_tick(void) {
         cl_lock();
         Remote *r = rm_find(u.pc);
         if (r && r->via >= 0) snprintf(ip, sizeof ip, "%s", r->addr[r->via].ip);
-        int listed = 0, kept = 0, moved_on = 0;
+        int listed = 0, kept = 0, moved_on = 0, btsync = 0;
         if (r && r->via >= 0) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, u.busid)) {
             // While it restarts its PC shows it in use (kept for this PC), or not at all while it's
             // off the bus. Anything else: its PC stopped keeping it (released, unplugged, countdown).
             if (strcmp(r->dev[k].state, "in_use")) moved_on = 1;
+            btsync = r->dev[k].btsync;
             if (!strcmp(r->dev[k].state, "available")) listed = 1;
             else if (!strcmp(r->dev[k].state, "kept")) kept = 1;
             // Its own PC took it back from this PC ("Take back" there) a moment ago: don't grab it
@@ -556,6 +564,7 @@ static void client_tick(void) {
         if (kept && g_use[i].used && g_use[i].port < 0 && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
             g_use[i].used = 0;
             cl_unlock();
+            plat_bt_after(u.pc, u.busid);
             logm("[%s] taken back by its own PC: stopped waiting, Auto-reconnect off", u.busid);
             changed = 1;
             continue;
@@ -564,6 +573,7 @@ static void client_tick(void) {
             g_use[i].restart_until = 0; g_use[i].restarts = 0;
             if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
             cl_unlock();
+            plat_bt_after(u.pc, u.busid);
             logm("[%s] its PC isn't keeping it for this PC: stopped reconnecting", u.busid);
             continue;
         }
@@ -583,7 +593,9 @@ static void client_tick(void) {
         if (!ip[0] || (!listed && !u.restart_until)) { cl_lock(); g_use[i].next_try = now + 2000; cl_unlock(); continue; }
         if (g_cl_asleep) break;
         pair_before_attach(u.pc, ip, u.busid);    // a paired PC: let it know it's really this PC asking
+        if (btsync) plat_bt_before(u.pc, ip, u.busid, u.restart_until != 0);   // a Bluetooth adapter: its pairings first
         int port = plat_attach(ip, u.busid);
+        if (port < 0 && btsync && !u.restart_until) plat_bt_after(u.pc, u.busid);   // didn't connect: its pairings go back
         cl_lock();
         if (g_use[i].used && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
             g_use[i].port = port;
@@ -618,6 +630,7 @@ static void client_sleep(void) {
     plat_stop_retries();
     cl_lock();
     for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used) {
+        if (g_use[i].port >= 0) plat_bt_after(g_use[i].pc, g_use[i].busid);
         g_use[i].port = -1; g_use[i].next_try = 0;
         if (!g_use[i].autorc) g_use[i].used = 0;
     }
@@ -636,7 +649,7 @@ static void client_wake(void) {
 // Release everything (quitting).
 static void client_release_all(void) {
     plat_client_tick_begin();
-    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) plat_detach(g_use[i].port);
+    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) { plat_detach(g_use[i].port); plat_bt_after(g_use[i].pc, g_use[i].busid); }
 }
 
 // ---------------------------------------------------------------- discovery messages
@@ -664,6 +677,12 @@ static char g_custom_name[64];    // "Rename this PC" ("" = use the computer's n
 static char g_theme[8] = "system";
 static int g_tray_login = 1;      // show the tray icon at sign-in
 static int g_boot_start = 1;      // "Start USBeam when this PC starts" (applied by plat_set_bootstart)
+static char g_skip_ver[16];       // "Skip this version": no update notice for it (only for a newer one)
+static int valid_version(const char *v) {      // "0.3.25": digits and dots
+    if (!v[0] || strlen(v) > 15) return 0;
+    for (const char *c = v; *c; c++) if (!isdigit((unsigned char)*c) && *c != '.') return 0;
+    return 1;
+}
 static void plat_set_bootstart(int on);   // make the service start with the PC, or only when USBeam is opened
 static void prefs_apply_name(void) {
     snprintf(g_name, sizeof g_name, "%s", g_custom_name[0] ? g_custom_name : g_hostname);
@@ -674,6 +693,7 @@ static void prefs_init(void) {     // call once after the computer's name is kno
 static void prefs_json(sb_t *j) {
     sb_add(j, "\"prefs\":{\"name\":", 16); sb_jstr(j, g_custom_name);
     sb_add(j, ",\"hostname\":", 12); sb_jstr(j, g_hostname);
+    sb_add(j, ",\"skip_version\":", 16); sb_jstr(j, g_skip_ver);
     // "tray" stays last: the tray app looks for "tray":false} at sign-in.
     sb_printf(j, ",\"hold\":%d,\"theme\":\"%s\",\"showhidden\":%s,\"inputwarned\":%s,\"inputrelease\":%d,\"bootstart\":%s,\"tray\":%s}",
               g_hold_secs, g_theme, g_show_hidden ? "true" : "false", g_input_warned ? "true" : "false", g_input_release,
@@ -682,7 +702,7 @@ static void prefs_json(sb_t *j) {
 static void prefs_reset(void) {
     g_custom_name[0] = 0; prefs_apply_name();
     g_hold_secs = 10; snprintf(g_theme, sizeof g_theme, "system"); g_tray_login = 1;
-    g_show_hidden = 0; g_input_warned = 0; g_input_release = 0;
+    g_show_hidden = 0; g_input_warned = 0; g_input_release = 0; g_skip_ver[0] = 0;
     if (!g_boot_start) { g_boot_start = 1; plat_set_bootstart(1); }
 }
 
@@ -693,6 +713,7 @@ static void client_save_lines(FILE *f) {
     fprintf(f, "hold %d\ntheme %s\ntraylogin %d\nshowhidden %d\ninputwarned %d\ninputrelease %d\n",
             g_hold_secs, g_theme, g_tray_login, g_show_hidden, g_input_warned, g_input_release);
     if (!g_boot_start) fprintf(f, "bootstart 0\n");
+    if (g_skip_ver[0]) fprintf(f, "skipversion %s\n", g_skip_ver);
     for (int i = 0; i < CL_MAXR; i++)
         if (g_r[i].id[0] && g_r[i].manual) for (int k = 0; k < g_r[i].naddr; k++) fprintf(f, "pc %s\n", g_r[i].addr[k].ip);
     for (int i = 0; i < CL_MAXW; i++)
@@ -742,6 +763,7 @@ static int client_load_line(const char *line) {
     if (sscanf(line, "hold %d", &n) == 1) { if (n >= 3 && n <= 120) g_hold_secs = n; return 1; }
     if (sscanf(line, "traylogin %d", &n) == 1) { g_tray_login = n != 0; return 1; }
     if (sscanf(line, "bootstart %d", &n) == 1) { g_boot_start = n != 0; return 1; }
+    if (sscanf(line, "skipversion %15s", a) == 1) { if (valid_version(a)) snprintf(g_skip_ver, sizeof g_skip_ver, "%s", a); return 1; }
     if (sscanf(line, "showhidden %d", &n) == 1) { g_show_hidden = n != 0; return 1; }
     if (sscanf(line, "inputwarned %d", &n) == 1) { g_input_warned = n != 0; return 1; }
     if (sscanf(line, "inputrelease %d", &n) == 1) { if (n >= 0 && n <= 240) g_input_release = n; return 1; }
@@ -821,7 +843,8 @@ static void client_json(sb_t *j) {
             sb_add(j, ",\"name\":", 8); sb_jstr(j, d->name);
             sb_add(j, ",\"vid\":", 7); sb_jstr(j, d->vid);
             sb_add(j, ",\"pid\":", 7); sb_jstr(j, d->pid);
-            sb_printf(j, ",\"state\":\"%s\",\"countdown\":%d,\"auto\":%s,\"input\":%s,\"peer\":", st, d->countdown, (u && u->autorc) ? "true" : "false", d->input ? "true" : "false");
+            sb_printf(j, ",\"state\":\"%s\",\"countdown\":%d,\"auto\":%s,\"input\":%s,\"bt\":%s,\"btsync\":%s,\"peer\":", st, d->countdown, (u && u->autorc) ? "true" : "false", d->input ? "true" : "false",
+                      d->bt ? "true" : "false", d->btsync && PLAT_BT_SYNC ? "true" : "false");
             char pl[160]; peer_label(d->peer, pl, sizeof pl, 1);
             sb_jstr(j, pl);
             const char *fe = strcmp(st, "mine") ? fail_get(r->id, d->busid, jnow) : NULL;
@@ -888,6 +911,14 @@ static int client_action(const char *op, const char *body, sb_t *out, int *code)
         g_boot_start = json_bool(body, "on");
         plat_set_bootstart(g_boot_start);
         logm(g_boot_start ? "USBeam starts with this PC now" : "USBeam starts only when it's opened now");
+        client_save();
+        return 1;
+    }
+    if (!strcmp(op, "skip_version")) {        // "Skip this version" on an update notice
+        char v[16] = ""; json_str(body, "value", v, sizeof v);
+        if (!valid_version(v)) { sb_printf(out, "%s", "{\"error\":\"Not a version.\"}"); *code = 400; return 1; }
+        snprintf(g_skip_ver, sizeof g_skip_ver, "%s", v);
+        logm("Update notices for USBeam %s are off; a newer version will be announced again", v);
         client_save();
         return 1;
     }

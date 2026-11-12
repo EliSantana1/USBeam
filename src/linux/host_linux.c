@@ -44,7 +44,11 @@ typedef struct {
     time_t reserve_until;  // came back after restarting: kept for that client (h->peer) until then
     int claim;             // open file + 1 holding its port while it restarts (claim_port), 0 = none
     int watch_gen;         // which hand-over the restart watcher belongs to (restart_watch)
+    char btaddr[18];       // Bluetooth adapter: its address, as last seen here (btkeys.h)
+    char bt_peer[40];      // the PC (USBeam id) its Bluetooth pairings went to, until they come back
+    time_t bt_wait_until;  // let go by that PC: held back here until its pairings are back (or then)
 } HostDev;
+#define BT_WAIT 8          // s a Bluetooth adapter is held back for its pairings to come back (btkeys.h)
 
 // Some devices restart themselves while the PC they were given to sets them up (a Bluetooth chip
 // whose firmware gets reloaded, for example): they drop off USB and come back a moment later.
@@ -53,6 +57,18 @@ typedef struct {
 #define RESTART_BACK 5     // s it has to come back in
 #define RESTART_KEEP 15    // s it is then kept for that PC to connect it again
 static int host_held(const HostDev *h) { return h && (h->restart_until || h->reserve_until); }
+static void return_to_host(const char *busid);
+static int bound_to_stub(const char *busid);
+static int write_sysfs(const char *path, const char *val);
+static int dev_present(const char *busid);
+// Ends the session with the PC using it. A Bluetooth adapter whose pairings went with it stays
+// unused here until they are back (btkeys.h), so this PC starts with them; anything else is back at once.
+static void host_let_go(HostDev *h) {
+    if (h->bt_peer[0] && dev_present(h->busid)) {
+        if (bound_to_stub(h->busid)) write_sysfs("/sys/bus/usb/drivers/usbip-host/unbind", h->busid);
+        h->bt_wait_until = time(NULL) + BT_WAIT;
+    } else return_to_host(h->busid);
+}
 
 static HostDev g_h[MAXH];
 static int pair_import_ok(const char *ip, const char *busid);   // pair.h
@@ -478,7 +494,7 @@ static int offerable(const char *busid) {
     if (!shareable(busid)) return 0;
     if (is_hidden(busid) || drive_mounted(busid)) return 0;
     if (system_reason(busid) && !is_shared(busid)) return 0;
-    if (h && (h->exported || h->blocked || host_held(h))) return 0;
+    if (h && (h->exported || h->blocked || host_held(h) || h->bt_wait_until)) return 0;
     return 1;
 }
 
@@ -699,9 +715,20 @@ static void host_tick(void) {
             char st[16] = "";
             read_attr(h->busid, "usbip_status", st, sizeof st);
             if (atoi(st) != 2) {     // 1 = available again: the client let go (or the network dropped)
-                return_to_host(h->busid);
                 h->exported = 0;
-                logm("[%s] %s released by %s. It works on this PC again.", h->busid, dev_name(h->busid, name, sizeof name), h->peer);
+                host_let_go(h);
+                if (h->bt_wait_until) logm("[%s] %s released by %s. Its Bluetooth pairings come back first.", h->busid, dev_name(h->busid, name, sizeof name), h->peer);
+                else logm("[%s] %s released by %s. It works on this PC again.", h->busid, dev_name(h->busid, name, sizeof name), h->peer);
+            }
+            continue;
+        }
+        if (h->bt_wait_until) {           // waiting for its Bluetooth pairings (host_let_go)
+            if (!h->bt_peer[0] || now >= h->bt_wait_until || !dev_present(h->busid)) {
+                int back = !h->bt_peer[0];
+                h->bt_wait_until = 0;
+                if (dev_present(h->busid)) return_to_host(h->busid);
+                logm("[%s] %s works on this PC again%s.", h->busid, dev_name(h->busid, name, sizeof name),
+                     back ? " with its Bluetooth pairings" : " (its Bluetooth pairings come back when that PC can send them)");
             }
             continue;
         }

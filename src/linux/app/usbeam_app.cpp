@@ -486,6 +486,7 @@ int main(int argc, char **argv) {
     };
     menu.addAction("Quit USBeam", quitApp);
     tray.setContextMenu(&menu);
+    QObject::connect(&tray, &QSystemTrayIcon::messageClicked, [&] { win.showUp(); });   // an update notice
     QObject::connect(&tray, &QSystemTrayIcon::activated, [&](QSystemTrayIcon::ActivationReason why) {
         if (why == QSystemTrayIcon::Trigger || why == QSystemTrayIcon::DoubleClick) {
             if (win.isVisible() && win.isActiveWindow()) win.hide(); else win.showUp();
@@ -589,6 +590,12 @@ int main(int argc, char **argv) {
             return;
         }
         if (what == "uninstall") { uninstall(); return; }
+        if (what == "notify") {          // a new version (the page checks): a notification; clicking it opens USBeam
+            const QString ver = q.queryItemValue("version");
+            if (ver.isEmpty() || ver.size() > 15 || ver.contains(QRegularExpression("[^0-9.]")) || !tray.isVisible()) return;
+            tray.showMessage(QString("USBeam %1 is available").arg(ver), "Click to update, or to skip this version.", appIcon(), 20000);
+            return;
+        }
         if (what == "quit") { QTimer::singleShot(0, &app, quitApp); return; }   // after this navigation request
         if (what == "update") {
             const QString src = q.queryItemValue("url", QUrl::FullyDecoded), sha = q.queryItemValue("sha256").toLower();

@@ -80,6 +80,12 @@ static int plat_port_alive(int port, const char *ip, const char *busid);
 static void plat_detach(int port);
 static const char *plat_client_note(void);
 static void plat_tune(void) {}
+// A Bluetooth adapter's pairings never come along to or from Windows: Windows keeps them its own
+// way and runs one Bluetooth adapter at a time (the Linux side: src/linux/btkeys.h).
+static void plat_bt_before(const char *pc, const char *ip, const char *busid, int again) { (void)pc; (void)ip; (void)busid; (void)again; }
+static void plat_bt_after(const char *pc, const char *busid) { (void)pc; (void)busid; }
+static void plat_bt_tick(void) {}
+#define PLAT_BT_SYNC 0
 
 #include "../common/client.h"
 
@@ -388,6 +394,7 @@ static void handle_info(SOCKET s) {
         sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", d->vid, d->pid, st, cd, input ? "true" : "false");
         sb_jstr(&j, (d->in_use || DEV_HELD(d)) ? d->peer : "");
         sb_add(&j, ",\"taken_from\":", 14); sb_jstr(&j, d->taken_from);
+        if (d->is_radio) sb_add(&j, ",\"bt\":true", 10);       // a Bluetooth adapter (its pairings don't come along from Windows)
         sb_add(&j, "}", 1);
     }
     LeaveCriticalSection(&g_devs_cs);
@@ -756,7 +763,8 @@ static void add_local_json(sb_t *j) {
         const char *note = d->is_net ? "network adapter, never shared" :
                            ((d->is_storage || d->is_light) && !d->share_forced && !busy) ?
                                (d->is_radio ? "Bluetooth/wireless adapter: shared only if you choose Share" :
-                                d->is_light ? "lighting controller: shared only if you choose Share" : "drive: shared only if you choose Share") : "";
+                                d->is_light ? "lighting controller: shared only if you choose Share" : "drive: shared only if you choose Share") :
+                           d->is_radio ? "its Bluetooth pairings don't go with it: Windows can't share them (this works only between Linux PCs)" : "";
         char name[512]; w2u(d->name, name, sizeof name);
         if (!first) sb_add(j, ",", 1);
         first = 0;

@@ -134,6 +134,17 @@ jobs:
         run: gcc -O2 -Wall -Werror -Wno-unused-function -pthread -o build/stream_test tests/stream_test.c -lm && build/stream_test
       - name: Restart test, using side (a device that restarts right after connecting is connected again; nothing else is grabbed)
         run: gcc -O2 -Wall -Werror -Wno-unused-function -pthread -o build/restart_test tests/restart_test.c && build/restart_test
+      - name: Bluetooth pairings test (an adapter's pairings go with it between Linux PCs and come back exactly; hostile data refused)
+        run: |
+          gcc -O2 -Wall -Werror -Wno-unused-function -Wno-format-truncation -pthread -o build/btkeys_test tests/btkeys_test.c && build/btkeys_test
+          gcc -O1 -g -Wall -Werror -Wno-unused-function -Wno-format-truncation -fsanitize=address,undefined -fno-sanitize-recover=all -pthread -o build/btkeys_asan tests/btkeys_test.c && build/btkeys_asan
+      - name: Update notice test (a new version is announced once a day; Skip this version keeps it quiet until the next one)
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: /tmp/pw-browsers
+        run: |
+          python3 -m venv /tmp/pw && /tmp/pw/bin/pip install --quiet playwright==1.49.1
+          /tmp/pw/bin/python -m playwright install --with-deps chromium >/dev/null
+          sudo -E /tmp/pw/bin/python tests/updnotice.py
 
   # The real Linux kernel parts: a virtual USB mouse shared through USBeam over a delayed link.
   mouse-feel-test:
