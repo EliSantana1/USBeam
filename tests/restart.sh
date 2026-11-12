@@ -115,11 +115,13 @@ stop_use
 
 echo "== 4. gone for longer than a restart right after being handed over"
 sleep 12      # (the countdown from step 3)
-n=$(grep -c "plugged back in and works on this PC" "$LOG/host")
+replugs() { grep -c "plugged back in and works on this PC" "$LOG/host"; }
+before=$(replugs)
+returned_again() { [ "$(replugs)" -gt "$before" ]; }
 use
 restart_device 8
-wait_for '[ "$(grep -c "plugged back in and works on this PC" "$LOG/host")" -gt "$n" ]' 10
-check '[ "$(grep -c "plugged back in and works on this PC" "$LOG/host")" -gt "$n" ]' "an unplug after all: back to its own side, as always"
+wait_for returned_again 10
+check returned_again "an unplug after all: back to its own side, as always"
 check 'wait_for here 10' "and works there"
 
 echo "--- what USBeam said"
