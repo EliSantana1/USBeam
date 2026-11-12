@@ -11,6 +11,8 @@
 #   3. long after being handed over (the user replugging it): back to its own side, with the
 #      countdown, as always
 #   4. right after being handed over, but gone for longer than a restart takes: an unplug, as always
+#   5. let go of normally (usbip-host resets it then), six times: never taken for an unplug, back
+#      on its own side each time, and off usbip-host's list
 set -u
 cd "$(dirname "$0")/.." || exit 1
 OUT=$(mktemp)
@@ -144,15 +146,17 @@ sleep 12      # (the countdown from step 4)
 unplugs() { grep -c "unplugged while" "$LOG/host"; }
 released() { grep -c "released by 10.78.0.1" "$LOG/host"; }
 u0=$(unplugs)
+let_go_seen() { [ "$(released)" -gt "$r0" ]; }
+no_new_unplug() { [ "$(unplugs)" = "$u0" ]; }
 for n in $(seq 1 6); do
     r0=$(released)
     use
     sleep 2
     stop_use
-    wait_for '[ "$(released)" -gt "$r0" ]' 10 || fail "round $n: the let-go wasn't noticed"
+    wait_for let_go_seen 10 || fail "round $n: the let-go wasn't noticed"
     wait_for here 10 || fail "round $n: it didn't work on its own side again"
 done
-check '[ "$(unplugs)" = "$u0" ]' "a normal let-go is never taken for an unplug"
+check no_new_unplug "a normal let-go is never taken for an unplug"
 check '! tr " " "\n" < /sys/bus/usb/drivers/usbip-host/match_busid | grep -qx "$BUSID"' "and it's off usbip-host's list"
 
 echo "--- what USBeam said"
