@@ -15,7 +15,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 OUT=$(mktemp)
 exec > >(tee -a "$OUT") 2>&1
-note() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=Restart test::$(tail -n 80 "$OUT" | sed 's/%/%25/g; s/\r//g' | awk 'BEGIN{ORS="%0A"} {print}')"; }
+note() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=Restart test::$(tail -n 140 "$OUT" | sed 's/%/%25/g; s/\r//g' | awk 'BEGIN{ORS="%0A"} {print}')"; }
 trap note EXIT
 trap 'echo "FAIL: the test took over 8 minutes"; exit 1' TERM
 ( sleep 480; kill -TERM $$ ) 2>/dev/null &
@@ -73,6 +73,10 @@ here() { python3 tests/mousefeel.py find local >/dev/null 2>&1; }      # working
 there() { python3 tests/mousefeel.py find >/dev/null 2>&1; }           # arrived on the using side
 wait_for() { for _ in $(seq 1 "$2"); do eval "$1" && return 0; sleep 1; done; return 1; }
 in_log() { grep -q "$1" "$LOG/host"; }
+local_uses() { dmesg | grep -c "USBeam Test Mouse\] on usb-dummy_hcd"; }   # times its own side's driver took it
+
+wait_for here 15
+check '[ "$(local_uses)" -ge 1 ]' "the test can see when its own side's driver takes it"
 
 echo "== USBeam sharing it (other side)"
 ip netns add usbeamrs
@@ -87,11 +91,13 @@ use() { build/usbeam use 10.78.0.2 "$BUSID" >>"$LOG/use" 2>&1 & wait_for there 3
 
 echo "== 1. restarts right after being handed over"
 use
+uses=$(local_uses)
+no_new_local_use() { [ "$(local_uses)" = "$uses" ]; }
 restart_device 1
 wait_for 'in_log "back after restarting"' 10
 check 'in_log "restarted itself while"' "the restart isn't taken for an unplug"
 check 'in_log "back after restarting"' "it's kept for the PC using it"
-check '[ "$(driver)" = usbip-host ] && ! here' "meanwhile its own side doesn't use it"
+check '[ "$(driver)" = usbip-host ] && ! here && no_new_local_use' "meanwhile its own side doesn't use it, not even for a moment"
 stop_use; use
 check 'in_log "is now in use by 10.78.0.1 again"' "the PC using it connects it again"
 check 'there' "and it works there"

@@ -42,6 +42,8 @@ typedef struct {
     unsigned exp_devnum, exp_vid, exp_pid;   // its USB address and ids then (a new address: it left the bus meanwhile)
     time_t restart_until;  // restarted itself while the client set it up: waiting for it to come back (host_tick)
     time_t reserve_until;  // came back after restarting: kept for that client (h->peer) until then
+    int claim;             // open file + 1 holding its port while it restarts (claim_port), 0 = none
+    int watch_gen;         // which hand-over the restart watcher belongs to (restart_watch)
 } HostDev;
 
 // Some devices restart themselves while the PC they were given to sets them up (a Bluetooth chip
@@ -217,17 +219,77 @@ static int stub_bind(const char *busid) {
 }
 
 static void return_to_host(const char *busid) {
-    char v[64];
+    char v[64], p[PATH_MAX], drv[PATH_MAX];
     if (is_system_drive_now(busid)) return;       // never re-probed: it is in use by this PC right now
     if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
     snprintf(v, sizeof v, "del %s", busid);
     write_sysfs(STUB "/match_busid", v);           // so a replug binds to the normal driver
+    // Left unconfigured while its port was claimed (claim_port): set it up from scratch.
+    read_attr(busid, "bConfigurationValue", v, sizeof v);
+    snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
+    ssize_t dl = readlink(p, drv, sizeof drv - 1);
+    if (dl > 0 && !v[0]) { drv[dl] = 0; if (!strcmp(strrchr(drv, '/') ? strrchr(drv, '/') + 1 : drv, "usb")) { snprintf(p, sizeof p, USBDEV "/%s/driver/unbind", busid); write_sysfs(p, busid); } }
     if (dev_present(busid)) write_sysfs("/sys/bus/usb/drivers_probe", busid);
+}
+
+// ---------------------------------------------------------------- devices restarting themselves
+// While a device restarts (host_tick), its port is claimed the way usbfs lets a program claim a hub
+// port: a device appearing there is left unconfigured, so no driver on this PC starts using it (a
+// Bluetooth chip would get its firmware loaded here, and the other PC would restart it once more).
+// The claim belongs to an open file of this process, so it also ends if USBeam stops.
+static int claim_port(const char *busid) {
+    char hub[40], node[64];
+    const char *dot = strrchr(busid, '.'), *dash = strchr(busid, '-');
+    int port;
+    if (!dash) return -1;
+    if (dot) { snprintf(hub, sizeof hub, "%.*s", (int)(dot - busid), busid); port = atoi(dot + 1); }
+    else { snprintf(hub, sizeof hub, "usb%.*s", (int)(dash - busid), busid); port = atoi(dash + 1); }   // on a root port
+    if (port <= 0) return -1;
+    snprintf(node, sizeof node, "/dev/bus/usb/%03u/%03u", attr_dec(hub, "busnum"), attr_dec(hub, "devnum"));
+    int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+    unsigned int pn = (unsigned int)port;
+    if (ioctl(fd, USBDEVFS_CLAIM_PORT, &pn) != 0) { close(fd); return -1; }
+    return fd;
+}
+static void release_claim(HostDev *h) {             // closing the file releases the port
+    int c = __atomic_exchange_n(&h->claim, 0, __ATOMIC_SEQ_CST);
+    if (c > 0) close(c - 1);
+}
+
+// The moment a device just handed over drops off the bus, claim its port, before it can come
+// back (that takes a USB reset and debounce, well over 100 ms). Watches for RESTART_SETUP s.
+typedef struct { HostDev *h; int gen; unsigned devnum; char busid[32]; } Watch;
+static void *restart_watch(void *arg) {
+    Watch w = *(Watch *)arg;
+    free(arg);
+    for (int i = 0; i < RESTART_SETUP * 50; i++) {
+        usleep(20000);
+        if (__atomic_load_n(&w.h->watch_gen, __ATOMIC_SEQ_CST) != w.gen) break;   // handed over again since
+        if (dev_present(w.busid) && attr_dec(w.busid, "devnum") == w.devnum) continue;
+        if (!__atomic_load_n(&w.h->exported, __ATOMIC_SEQ_CST) && !__atomic_load_n(&w.h->restart_until, __ATOMIC_SEQ_CST)) break;   // released normally
+        int fd = claim_port(w.busid);
+        if (fd < 0) continue;                     // (usbip-host may not have let go of the port yet)
+        int old = __atomic_exchange_n(&w.h->claim, fd + 1, __ATOMIC_SEQ_CST);
+        if (old > 0) close(old - 1);
+        break;
+    }
+    return NULL;
+}
+static void restart_watch_start(HostDev *h) {
+    Watch *w = malloc(sizeof *w);
+    if (!w) return;
+    w->h = h; w->gen = __atomic_add_fetch(&h->watch_gen, 1, __ATOMIC_SEQ_CST); w->devnum = h->exp_devnum;
+    snprintf(w->busid, sizeof w->busid, "%s", h->busid);
+    pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &at, restart_watch, w)) free(w);
+    pthread_attr_destroy(&at);
 }
 
 // Stop keeping a restarted device for the PC it restarted on: it works on this PC again. One that
 // hasn't come back yet counts as unplugged (it returns to this PC when it's back).
 static void host_end_hold(HostDev *h) {
+    release_claim(h);
     if (h->restart_until && !dev_present(h->busid)) {
         char v[64]; snprintf(v, sizeof v, "del %s", h->busid);
         write_sysfs(STUB "/match_busid", v);
@@ -596,6 +658,8 @@ static void handle_import(int s, const char *peer) {
     h->exp_devnum = attr_dec(busid, "devnum");
     h->exp_vid = attr_hex(busid, "idVendor"); h->exp_pid = attr_hex(busid, "idProduct");
     snprintf(h->peer, sizeof h->peer, "%s", peer);
+    release_claim(h);
+    restart_watch_start(h);
     logm("[%s] %s is now in use by %s%s", busid, name, peer, again ? " again" : "");
 }
 
@@ -606,6 +670,10 @@ static void host_tick(void) {
     for (int i = 0; i < MAXH; i++) {
         HostDev *h = &g_h[i];
         if (!h->busid[0]) continue;
+        if (h->claim && !h->exported && !host_held(h)) {    // (a port claim left over: never keep one)
+            release_claim(h);
+            if (dev_present(h->busid) && !bound_to_stub(h->busid)) return_to_host(h->busid);
+        }
         if (h->exported) {
             // Gone, or back already as a new connection (a new USB address): it left the bus.
             if (!dev_present(h->busid) || attr_dec(h->busid, "devnum") != h->exp_devnum) {
@@ -635,6 +703,7 @@ static void host_tick(void) {
         if (h->restart_until) {
             if (dev_present(h->busid)) {
                 // Back. Only the same kind of device is kept for that PC; anything else stays here.
+                release_claim(h);                // usbip-host claims the port itself when it takes it
                 if (attr_hex(h->busid, "idVendor") == h->exp_vid && attr_hex(h->busid, "idProduct") == h->exp_pid &&
                     shareable(h->busid) && (bound_to_stub(h->busid) || stub_bind(h->busid) == 0)) {
                     h->restart_until = 0; h->reserve_until = now + RESTART_KEEP;
