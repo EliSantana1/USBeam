@@ -254,6 +254,31 @@ static std::wstring sha256_file(const std::wstring &path) {
 }
 
 struct UpdateJob { std::wstring url, sha, ver; };
+static volatile LONG g_updating;   // an update is being downloaded or installed (its file is in use)
+
+// Installers an update downloaded to the temporary folder. The installer removes older ones, but not
+// itself: it's still running while it starts this app again. So this app removes them once they're
+// done: at start, then every 30 s for 5 minutes (until none are left). Only USBeam-Setup-*.exe files.
+static DWORD WINAPI cleanup_downloads(LPVOID) {
+    wchar_t tmp[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, tmp)) return 0;
+    for (int round = 0; round < 11; round++) {
+        if (round) Sleep(30000);
+        if (g_updating) continue;
+        int left = 0;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((std::wstring(tmp) + L"USBeam-Setup-*.exe").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return 0;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (!DeleteFileW((std::wstring(tmp) + fd.cFileName).c_str())) left++;     // still running
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (!left) return 0;
+    }
+    return 0;
+}
+
 static DWORD WINAPI update_thread(LPVOID arg) {
     UpdateJob *j = (UpdateJob *)arg;
     typedef HRESULT (WINAPI *Dl_t)(LPUNKNOWN, LPCWSTR, LPCWSTR, DWORD, void *);
@@ -262,11 +287,11 @@ static DWORD WINAPI update_thread(LPVOID arg) {
     wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
     std::wstring file = std::wstring(tmp) + L"USBeam-Setup-" + j->ver + L".exe";
     report(L"Downloading USBeam " + j->ver + L"…");
-    if (!dl || FAILED(dl(nullptr, j->url.c_str(), file.c_str(), 0, nullptr))) { report(L"The download failed. Is this PC online?"); delete j; return 0; }
+    if (!dl || FAILED(dl(nullptr, j->url.c_str(), file.c_str(), 0, nullptr))) { DeleteFileW(file.c_str()); InterlockedExchange(&g_updating, 0); report(L"The download failed. Is this PC online?"); delete j; return 0; }
     if (!j->sha.empty()) {
         std::wstring got = sha256_file(file);
         for (auto &c : j->sha) c = towlower(c);
-        if (got != j->sha) { DeleteFileW(file.c_str()); report(L"The download was damaged (its fingerprint doesn't match). Nothing was changed."); delete j; return 0; }
+        if (got != j->sha) { DeleteFileW(file.c_str()); InterlockedExchange(&g_updating, 0); report(L"The download was damaged (its fingerprint doesn't match). Nothing was changed."); delete j; return 0; }
     }
     report(L"Installing… Windows will ask for permission.");
     SHELLEXECUTEINFOW se = { sizeof se };
@@ -275,7 +300,7 @@ static DWORD WINAPI update_thread(LPVOID arg) {
     se.lpFile = file.c_str();
     se.lpParameters = L"/SILENT /SUPPRESSMSGBOXES /NORESTART";
     se.nShow = SW_SHOWNORMAL;
-    if (!ShellExecuteExW(&se)) report(L"The update was cancelled.");
+    if (!ShellExecuteExW(&se)) { DeleteFileW(file.c_str()); InterlockedExchange(&g_updating, 0); report(L"The update was cancelled."); }
     delete j;            // the installer closes this app, updates USBeam and opens it again
     return 0;
 }
@@ -292,6 +317,7 @@ static void app_link(const std::wstring &uri) {
         if (j->url.compare(0, wcslen(DOWNLOADS), DOWNLOADS) != 0 || j->ver.empty() || j->url.find(L"..") != std::wstring::npos ||
             j->url.find_first_of(L"\\%?#") != std::wstring::npos || j->url.size() < 5 || j->url.compare(j->url.size() - 4, 4, L".exe") != 0) { delete j; report(L"This update can't be installed from here."); return; }
         for (wchar_t c : j->ver) if (!iswdigit(c) && c != L'.') { delete j; return; }
+        if (InterlockedExchange(&g_updating, 1)) { delete j; report(L"The update is already being downloaded…"); return; }
         CloseHandle(CreateThread(nullptr, 0, update_thread, j, 0, nullptr));
     } else if (what == L"restart_pc") {              // "Restart now" (after a driver install), confirmed in the page
         HANDLE tok;
@@ -538,6 +564,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int show) {
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     tray_add();
     ensure_service();
+    CloseHandle(CreateThread(nullptr, 0, cleanup_downloads, nullptr, 0, nullptr));
     if (tray_only) {
         // At sign-in: only stay if "Show USBeam in the tray when I sign in" is on.
         std::string st;

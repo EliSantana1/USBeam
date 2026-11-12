@@ -81,6 +81,8 @@ $app = Join-Path (AppDir) 'USBeam.exe'
 1..3 | ForEach-Object { Start-Process $app }
 Start-Sleep 2; Start-Process $app -ArgumentList '--tray'
 CheckClean
+# The installer can't remove itself (it starts the app while still running): the app removes it.
+WaitFor 'the downloaded installer was left in the temporary folder' 90 { -not (Test-Path $dl) } | Out-Null
 
 Say "5. Uninstall"
 $dir = AppDir
