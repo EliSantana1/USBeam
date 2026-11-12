@@ -20,6 +20,9 @@
 // never take part: their adapters simply don't bring pairings along.
 
 #include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <signal.h>
 
 #define OP_REQ_BT 0x8FE6          // USBeam extension: a Bluetooth adapter's pairings (paired PCs only)
 #define OP_REP_BT 0x0FE6
@@ -89,14 +92,42 @@ static int bt_adapter_addr(const char *busid, char out[18]) {
     return 0;
 }
 
+// ---------------------------------------------------------------- devices connected through it
+// The devices connected through the adapter when it leaves a PC are connected again where it goes
+// (and back), so a headset follows the adapter instead of waiting to be connected by hand.
+#define BT_MAXCONN 8
+typedef struct {
+    char addr[18];                          // the adapter
+    char conn[BT_MAXCONN][18]; int nconn;   // connected through it, as last seen on this PC
+    char want[BT_MAXCONN][18]; int nwant;   // to connect again here (received with its pairings)
+    unsigned long long want_until, next_try;
+    int busy;                               // a connect attempt is running (bt_connect_main)
+} BtConn;
+static BtConn g_btc[BT_MAXSESS];
+static BtConn *bt_conn(const char *addr, int create) {   // call with g_bt_mx held
+    for (int i = 0; i < BT_MAXSESS; i++) if (g_btc[i].addr[0] && !strcmp(g_btc[i].addr, addr)) return &g_btc[i];
+    if (!create) return NULL;
+    for (int i = 0; i < BT_MAXSESS; i++) if (!g_btc[i].addr[0]) { memset(&g_btc[i], 0, sizeof g_btc[i]); snprintf(g_btc[i].addr, 18, "%s", addr); return &g_btc[i]; }
+    return NULL;
+}
+
 // ---------------------------------------------------------------- the pairings, packed
-// "USBEAMBT1" + adapter address, then per device: its address (17), length (4), its info file.
+// "USBEAMBT1" + adapter address + how many devices are connected (1) + their addresses (17 each),
+// then per paired device: its address (17), length (4), its info file.
 static void bt_put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = (uint8_t)v; }
 static uint32_t bt_get32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
 static int bt_pack(const char *addr, sb_t *out) {
     sb_add(out, "USBEAMBT1", 9);
     sb_add(out, addr, 17);
+    char conn[BT_MAXCONN][18]; int nc = 0;
+    pthread_mutex_lock(&g_bt_mx);
+    BtConn *c = bt_conn(addr, 0);
+    if (c) { nc = c->nconn; memcpy(conn, c->conn, sizeof conn); }
+    pthread_mutex_unlock(&g_bt_mx);
+    uint8_t nb = (uint8_t)nc;
+    sb_add(out, (const char *)&nb, 1);
+    for (int i = 0; i < nc; i++) sb_add(out, conn[i], 17);
     char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s/%s", g_bt_store, addr);
     DIR *d = opendir(dir);
     if (!d) return 0;                                 // no pairings yet
@@ -146,10 +177,14 @@ static void bt_rmdir_all(const char *dir) {        // one device's folder: files
 // that set. *changed = 1 if anything differed. 0 = done.
 static int bt_apply(const char *addr, const uint8_t *b, size_t n, int *changed) {
     if (changed) *changed = 0;
-    if (n < 26 || memcmp(b, "USBEAMBT1", 9) || memcmp(b + 9, addr, 17) || !bt_valid_addr(addr)) return -1;
+    if (n < 27 || memcmp(b, "USBEAMBT1", 9) || memcmp(b + 9, addr, 17) || !bt_valid_addr(addr)) return -1;
     // Check everything first: nothing is written unless the whole set is sound.
+    int nc = b[26];
+    if (nc > BT_MAXCONN || n < 27 + (size_t)nc * 17) return -1;
+    char conn[BT_MAXCONN][18];
+    for (int i = 0; i < nc; i++) { memcpy(conn[i], b + 27 + i * 17, 17); conn[i][17] = 0; if (!bt_valid_addr(conn[i])) return -1; }
     char devs[BT_MAXDEV][18]; const uint8_t *data[BT_MAXDEV]; uint32_t lens[BT_MAXDEV]; int nd = 0;
-    size_t off = 26;
+    size_t off = 27 + (size_t)nc * 17;
     while (off < n) {
         if (nd >= BT_MAXDEV || n - off < 21) return -1;
         memcpy(devs[nd], b + off, 17); devs[nd][17] = 0;
@@ -197,6 +232,15 @@ static int bt_apply(const char *addr, const uint8_t *b, size_t n, int *changed) 
         closedir(d);
     }
     if (changed) *changed = ch;
+    // The devices that were connected through it: connect them again here once it's working.
+    pthread_mutex_lock(&g_bt_mx);
+    BtConn *c = bt_conn(addr, 1);
+    if (c) {
+        c->nwant = 0;
+        for (int i = 0; i < nc; i++) for (int k = 0; k < nd; k++) if (!strcmp(conn[i], devs[k])) { snprintf(c->want[c->nwant++], 18, "%s", conn[i]); break; }
+        c->want_until = now_ms() + 90000; c->next_try = 0;
+    }
+    pthread_mutex_unlock(&g_bt_mx);
     return 0;
 }
 static void bt_forget(const char *addr) {       // remove this PC's copy of an adapter's pairings
@@ -214,6 +258,172 @@ static void bt_forget(const char *addr) {       // remove this PC's copy of an a
         closedir(d);
     }
     rmdir(dir);
+}
+
+// ---------------------------------------------------------------- connected devices, through BlueZ
+// The adapter with this address, if it's working on this PC: its hci number, else -1.
+static char g_bt_class[64] = "/sys/class/bluetooth";
+static int bt_hci_of(const char *addr) {
+    DIR *d = opendir(g_bt_class);
+    if (!d) return -1;
+    struct dirent *e; int found = -1;
+    int s = socket(31 /* AF_BLUETOOTH */, SOCK_RAW | SOCK_CLOEXEC, 1 /* BTPROTO_HCI */);
+    while (s >= 0 && found < 0 && (e = readdir(d))) {
+        if (strncmp(e->d_name, "hci", 3) || !isdigit((unsigned char)e->d_name[3]) || strchr(e->d_name, ':')) continue;
+        struct bt_devinfo di; memset(&di, 0, sizeof di); di.dev_id = (uint16_t)atoi(e->d_name + 3);
+        if (ioctl(s, BT_HCIGETDEVINFO, &di) != 0) continue;
+        char a[18]; const uint8_t *x = di.bdaddr;
+        snprintf(a, sizeof a, "%02X:%02X:%02X:%02X:%02X:%02X", x[5], x[4], x[3], x[2], x[1], x[0]);
+        if (!strcmp(a, addr)) found = di.dev_id;
+    }
+    if (s >= 0) close(s);
+    closedir(d);
+    return found;
+}
+// Runs busctl (systemd's D-Bus tool) with these arguments; its output in out. 0 = it succeeded.
+static int bt_busctl(const char *const args[], char *out, size_t n, int timeout_s) {
+    int pfd[2];
+    if (pipe(pfd)) return -1;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC); fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        dup2(pfd[1], 1);
+        int nul = open("/dev/null", O_RDWR); if (nul >= 0) { dup2(nul, 0); dup2(nul, 2); }
+        const char *argv[16]; int k = 0;
+        argv[k++] = "busctl";
+        for (int i = 0; args[i] && k < 15; i++) argv[k++] = args[i];
+        argv[k] = NULL;
+        execv("/usr/bin/busctl", (char *const *)argv);
+        execv("/bin/busctl", (char *const *)argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    size_t got = 0; if (out && n) out[0] = 0;
+    struct pollfd pf = { pfd[0], POLLIN, 0 };
+    unsigned long long end = now_ms() + (unsigned long long)timeout_s * 1000;
+    for (;;) {
+        unsigned long long now = now_ms();
+        if (now >= end) break;
+        if (poll(&pf, 1, (int)(end - now)) <= 0) break;
+        char buf[256]; ssize_t r = read(pfd[0], buf, sizeof buf);
+        if (r <= 0) break;
+        if (out && got + 1 < n) { size_t k = (size_t)r; if (k > n - 1 - got) k = n - 1 - got; memcpy(out + got, buf, k); got += k; out[got] = 0; }
+    }
+    close(pfd[0]);
+    int st = 0;
+    if (waitpid(pid, &st, WNOHANG) == 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); return -1; }
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
+}
+static void bt_dev_path(char out[64], int hci, const char *dev) {
+    char d[18]; snprintf(d, sizeof d, "%s", dev);
+    for (char *c = d; *c; c++) if (*c == ':') *c = '_';
+    snprintf(out, 64, "/org/bluez/hci%d/dev_%s", hci, d);
+}
+static int bt_is_connected(int hci, const char *dev) {
+    char path[64], out[64];
+    bt_dev_path(path, hci, dev);
+    const char *a[] = { "--system", "get-property", "org.bluez", path, "org.bluez.Device1", "Connected", NULL };
+    return bt_busctl(a, out, sizeof out, 3) == 0 && !strncmp(out, "b true", 6);
+}
+
+// A connect attempt runs on its own, so nothing else waits for the device to answer.
+typedef struct { char addr[18], dev[18]; int hci; } BtConnJob;
+static void *bt_connect_main(void *arg) {
+    BtConnJob j = *(BtConnJob *)arg; free(arg);
+    char path[64];
+    bt_dev_path(path, j.hci, j.dev);
+    const char *a[] = { "--system", "--timeout=12", "call", "org.bluez", path, "org.bluez.Device1", "Connect", NULL };
+    int ok = bt_busctl(a, NULL, 0, 15) == 0 || bt_is_connected(j.hci, j.dev);
+    pthread_mutex_lock(&g_bt_mx);
+    BtConn *c = bt_conn(j.addr, 0);
+    if (c) {
+        c->busy = 0;
+        if (ok) for (int i = 0; i < c->nwant; i++) if (!strcmp(c->want[i], j.dev)) { c->want[i][0] = 0; break; }
+    }
+    pthread_mutex_unlock(&g_bt_mx);
+    if (ok) logm("Bluetooth device %s connected again through the adapter that came here", j.dev);
+    return NULL;
+}
+
+// What is connected through the adapter right now (it must be working here): remembered for it.
+static void bt_snapshot(const char *addr, int hci, char devs[BT_MAXCONN][18], int conn[BT_MAXCONN], int *ndp) {
+    int nd = 0;
+    char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s/%s", g_bt_store, addr);
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && nd < BT_MAXCONN && (e = readdir(d))) if (bt_valid_addr(e->d_name)) snprintf(devs[nd++], 18, "%s", e->d_name);
+    if (d) closedir(d);
+    for (int k = 0; k < nd; k++) conn[k] = bt_is_connected(hci, devs[k]);
+    pthread_mutex_lock(&g_bt_mx);
+    BtConn *c = bt_conn(addr, 1);
+    if (c) { c->nconn = 0; for (int k = 0; k < nd; k++) if (conn[k]) snprintf(c->conn[c->nconn++], 18, "%s", devs[k]); }
+    pthread_mutex_unlock(&g_bt_mx);
+    *ndp = nd;
+}
+static void bt_snapshot_now(const char *addr) {
+    int hci = bt_hci_of(addr);
+    if (hci < 0) return;
+    char devs[BT_MAXCONN][18]; int conn[BT_MAXCONN] = {0}, nd = 0;
+    bt_snapshot(addr, hci, devs, conn, &nd);
+}
+
+// Every 2 s (every half second while something is waiting to be connected again), for the
+// adapters USBeam moves (on either side): remember what is connected through them, and connect
+// again what was connected where the adapter came from.
+static void bt_conn_tick(void) {
+    static unsigned long long next;
+    unsigned long long now = now_ms();
+    if (now < next) return;
+    char addrs[BT_MAXSESS * 2][18]; int na = 0;
+    host_lock();
+    for (int i = 0; i < MAXH && na < BT_MAXSESS; i++) if (g_h[i].busid[0] && bt_valid_addr(g_h[i].btaddr)) snprintf(addrs[na++], 18, "%s", g_h[i].btaddr);
+    host_unlock();
+    pthread_mutex_lock(&g_bt_mx);
+    for (int i = 0; i < BT_MAXSESS && na < BT_MAXSESS * 2; i++) if (g_bts[i].state == BTS_HERE) snprintf(addrs[na++], 18, "%s", g_bts[i].addr);
+    int waiting = 0;
+    for (int i = 0; i < BT_MAXSESS && na < BT_MAXSESS * 2; i++) if (g_btc[i].addr[0] && g_btc[i].nwant) { snprintf(addrs[na++], 18, "%s", g_btc[i].addr); waiting = 1; }
+    pthread_mutex_unlock(&g_bt_mx);
+    next = now + (waiting ? 500 : 2000);
+    for (int i = 0; i < na; i++) {
+        int dup = 0;
+        for (int k = 0; k < i && !dup; k++) if (!strcmp(addrs[k], addrs[i])) dup = 1;
+        if (dup) continue;
+        int hci = bt_hci_of(addrs[i]);
+        if (hci < 0) continue;                    // not working on this PC: keep what was last seen
+        // What is connected through it now.
+        char devs[BT_MAXCONN][18]; int nd = 0, conn[BT_MAXCONN] = {0};
+        bt_snapshot(addrs[i], hci, devs, conn, &nd);
+        pthread_mutex_lock(&g_bt_mx);
+        BtConn *c = bt_conn(addrs[i], 1);
+        if (c) {
+            // Connect again what was connected where it came from (one device at a time).
+            if (c->nwant && now >= c->want_until) c->nwant = 0;
+            if (c->nwant && !c->busy && now >= c->next_try) {
+                int pick = -1, left = 0;
+                for (int k = 0; k < c->nwant; k++) {
+                    if (!c->want[k][0]) continue;
+                    int already = 0;
+                    for (int m = 0; m < nd; m++) if (conn[m] && !strcmp(devs[m], c->want[k])) already = 1;
+                    if (already) { c->want[k][0] = 0; continue; }
+                    left++;
+                    if (pick < 0) pick = k;
+                }
+                if (!left) c->nwant = 0;
+                else {
+                    BtConnJob *j = malloc(sizeof *j);
+                    if (j) {
+                        snprintf(j->addr, 18, "%s", c->addr); snprintf(j->dev, 18, "%s", c->want[pick]); j->hci = hci;
+                        pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+                        c->busy = 1; c->next_try = now + 2000;
+                        if (pthread_create(&t, &at, bt_connect_main, j)) { c->busy = 0; free(j); }
+                        pthread_attr_destroy(&at);
+                    }
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_bt_mx);
+    }
 }
 
 // ---------------------------------------------------------------- sealing
@@ -329,6 +539,7 @@ static void bt_server(plat_sock s, const char *peer, const uint8_t *op) {
         host_unlock();
         if (!ok) { st = 3; pr_reply(s, OP_REP_BT, &st, 1); crypto_wipe(k, sizeof k); return; }
         sb_t plain = {0}, sealed = {0};
+        bt_snapshot_now(addr);                   // what is connected through it now, so it follows it
         bt_pack(addr, &plain);
         st = 0;
         if (!bt_seal(&sealed, k, &plain)) { pr_reply(s, OP_REP_BT, &st, 1); bt_send_blob(s, &sealed); }
@@ -496,6 +707,7 @@ static void plat_bt_after(const char *pc, const char *busid) {
 }
 // Sends back what is due, as soon as the PC it belongs to can be reached (client_tick, every second).
 static void plat_bt_tick(void) {
+    bt_conn_tick();
     unsigned long long now = now_ms();
     for (int i = 0; i < BT_MAXSESS; i++) {
         char pc[40], busid[32], addr[18], ip[64] = "";

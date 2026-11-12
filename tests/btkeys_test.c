@@ -125,6 +125,7 @@ static void run_host(int ls) {
     memset(g_pr, 0, sizeof g_pr);
     snprintf(g_pr[0].id, sizeof g_pr[0].id, "%s", g_id); memcpy(g_pr[0].key, g_host_key, 32);
     HostDev *h = hdev("1-2", 1); snprintf(h->btaddr, sizeof h->btaddr, ADDR);
+    BtConn *c = bt_conn(ADDR, 1); c->nconn = 1; snprintf(c->conn[0], 18, DEV1);   // the headset is connected there
     for (;;) {
         int s = accept(ls, NULL, NULL);
         if (s < 0) continue;
@@ -153,6 +154,7 @@ int main(void) {
     snprintf(hostdir, sizeof hostdir, "%s/host", root); snprintf(usedir, sizeof usedir, "%s/use", root);
     mkdir(root, 0700); mkdir(hostdir, 0700); mkdir(usedir, 0700);
     snprintf(g_bt_store, sizeof g_bt_store, "%s", usedir);
+    snprintf(g_bt_class, sizeof g_bt_class, "%s/no-adapters", root);   // never this PC's own Bluetooth adapters
     plat_random(g_host_key, 32);
     // This PC knows the other one by the same id here (one process, one id), with the same pair key.
     snprintf(g_pr[0].id, sizeof g_pr[0].id, "%s", g_id); memcpy(g_pr[0].key, g_host_key, 32);
@@ -175,6 +177,8 @@ int main(void) {
     check(has(usedir, DEV1, "[LinkKey]\nKey=AAAA\n") && has(usedir, DEV2, "[LinkKey]\nKey=BBBB\n"), "both pairings are in place here");
     host_cmd(0x7778, st, sizeof st);
     check(!strncmp(st, g_id, strlen(g_id)), "its PC knows which PC has them");
+    BtConn *bc = bt_conn(ADDR, 0);
+    check(bc && bc->nwant == 1 && !strcmp(bc->want[0], DEV1), "the device connected there is to be connected here too");
 
     printf("2. While here: one pairing changed, one removed, one new\n");
     put(usedir, DEV1, "[LinkKey]\nKey=CCCC\n");
@@ -255,14 +259,20 @@ int main(void) {
     check(bt_apply("AA:BB:CC:DD:EE:FF", (const uint8_t *)s9.p, s9.len, &ch) != 0, "a set for another adapter is refused");
     check(bt_apply(ADDR, (const uint8_t *)s9.p, s9.len - 1, &ch) != 0, "a cut-off set is refused");
     sb_t bad = {0}; uint8_t l[4];
-    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, "../../../etc/xxxx", 17); bt_put32(l, 4); sb_add(&bad, (const char *)l, 4); sb_add(&bad, "evil", 4);
+sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, "\0", 1); sb_add(&bad, "../../../etc/xxxx", 17); bt_put32(l, 4); sb_add(&bad, (const char *)l, 4); sb_add(&bad, "evil", 4);
     check(bt_apply(ADDR, (const uint8_t *)bad.p, bad.len, &ch) != 0, "a device name that is a path is refused");
     sb_free(&bad);
-    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, DEV1, 17); bt_put32(l, 3); sb_add(&bad, (const char *)l, 4); sb_add(&bad, "a\0b", 3);
+    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, "\0", 1); sb_add(&bad, DEV1, 17); bt_put32(l, 3); sb_add(&bad, (const char *)l, 4); sb_add(&bad, "a\0b", 3);
     check(bt_apply(ADDR, (const uint8_t *)bad.p, bad.len, &ch) != 0, "binary data is refused");
     sb_free(&bad);
-    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, DEV1, 17); bt_put32(l, 0x7FFFFFFF); sb_add(&bad, (const char *)l, 4);
+    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, "\0", 1); sb_add(&bad, DEV1, 17); bt_put32(l, 0x7FFFFFFF); sb_add(&bad, (const char *)l, 4);
     check(bt_apply(ADDR, (const uint8_t *)bad.p, bad.len, &ch) != 0, "an impossible size is refused");
+    sb_free(&bad);
+    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, "\xC8", 1);
+    check(bt_apply(ADDR, (const uint8_t *)bad.p, bad.len, &ch) != 0, "too many connected devices is refused");
+    sb_free(&bad);
+    sb_add(&bad, "USBEAMBT1", 9); sb_add(&bad, ADDR, 17); sb_add(&bad, "\x01", 1); sb_add(&bad, "../../../etc/xxxx", 17);
+    check(bt_apply(ADDR, (const uint8_t *)bad.p, bad.len, &ch) != 0, "a connected device that isn't an address is refused");
     sb_free(&bad); sb_free(&s9);
     check(has(usedir, DEV3, "[LinkKey]\nKey=FFFF\n"), "nothing was changed by them");
     check(!bt_valid_busid("1-2/../x") && !bt_valid_busid("../1-2") && !bt_valid_busid("1-.2") && !bt_valid_busid("1-2.") && bt_valid_busid("1-11.4"), "only real bus ids are accepted");

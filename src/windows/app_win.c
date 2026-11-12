@@ -619,7 +619,8 @@ static const char *plat_client_note(void) {
 static DWORD WINAPI client_main(LPVOID arg) {
     if (have_usbip()) usbip_stop_retries();      // nothing reconnects behind USBeam's back
     for (;;) {
-        if (WaitForSingleObject(g_quit_event, 1000) == WAIT_OBJECT_0) break;
+        // About once a second; sooner when a device is due to be connected or was just connected.
+        if (WaitForSingleObject(g_quit_event, client_hurry() ? 100 : 1000) == WAIT_OBJECT_0) break;
         client_tick();
     }
     return 0;

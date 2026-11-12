@@ -217,34 +217,152 @@ static void usb_reset_now(const char *busid) {
     if (fd < 0 || ioctl(fd, USBDEVFS_RESET, 0) != 0) logm("[%s] USB reset before handing it over failed: %s", busid, strerror(errno));
     if (fd >= 0) close(fd);
 }
+// ---------------------------------------------------------------- Realtek Bluetooth adapters
+// A Realtek Bluetooth adapter keeps the firmware a PC loaded into it. The next PC's Linux finds it
+// loaded and makes the adapter restart to load its own (it drops off USB and comes back), and a
+// pending request to the gone adapter then holds everything up for over 10 seconds. So USBeam asks
+// the adapter to drop its firmware itself (Realtek's command FC66, the one Linux uses) before
+// handing it on, in either direction: it restarts here in about a second, and the next PC starts
+// it clean, at once. Adapters without loaded firmware ignore the command; nothing else is sent.
+static int dev_ifaces(const char *busid, unsigned char ifc[][3], int max);
+static int claim_port(const char *busid);
+static unsigned long long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (unsigned long long)t.tv_sec * 1000 + (unsigned long long)t.tv_nsec / 1000000; }
+static int is_realtek_bt(const char *busid) {
+    char m[64]; read_attr(busid, "manufacturer", m, sizeof m);
+    if (strcmp(m, "Realtek")) return 0;
+    unsigned char ifc[32][3]; int n = dev_ifaces(busid, ifc, 32);
+    for (int i = 0; i < n; i++) if (ifc[i][0] == 0xe0 && ifc[i][1] == 0x01 && ifc[i][2] == 0x01) return 1;
+    return 0;
+}
+// It dropped off and came back (as a new device): 1. Waits up to ms for it.
+static int wait_reenumerated(const char *busid, unsigned devnum, int ms) {
+    unsigned long long start = mono_ms();
+    int left = 0;
+    while (mono_ms() - start < (unsigned long long)ms) {
+        if (!dev_present(busid)) left = 1;
+        else if (attr_dec(busid, "devnum") != devnum) {          // back, as a new device
+            char p[PATH_MAX]; struct stat st;
+            snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
+            for (int i = 0; i < 50 && lstat(p, &st) != 0; i++) usleep(20000);   // until Linux has set it up
+            return 1;
+        }
+        if (!left && mono_ms() - start > 1500) return 0;          // it didn't leave: it isn't restarting
+        usleep(20000);
+    }
+    return 0;
+}
+// Working on this PC (its driver loaded): the command goes through Linux's Bluetooth stack.
+static int rtk_drop_via_hci(const char *busid) {
+    char pat[PATH_MAX]; glob_t g; int idx = -1;
+    snprintf(pat, sizeof pat, USBDEV "/%s/%s:*/bluetooth/hci*", busid, busid);
+    if (glob(pat, 0, NULL, &g) != 0) return -1;
+    for (size_t i = 0; i < g.gl_pathc && idx < 0; i++) { const char *b = strrchr(g.gl_pathv[i], '/'); if (b && isdigit((unsigned char)b[4])) idx = atoi(b + 4); }
+    globfree(&g);
+    if (idx < 0) return -1;
+    int s = socket(31 /* AF_BLUETOOTH */, SOCK_RAW | SOCK_CLOEXEC, 1 /* BTPROTO_HCI */);
+    if (s < 0) return -1;
+    struct { unsigned short family, dev, channel; } a = { 31, (unsigned short)idx, 0 };
+    const unsigned char cmd[4] = { 0x01, 0x66, 0xfc, 0x00 };          // command packet: opcode FC66, no parameters
+    int ok = bind(s, (struct sockaddr *)&a, sizeof a) == 0 && write(s, cmd, sizeof cmd) == (ssize_t)sizeof cmd;
+    close(s);
+    return ok ? 0 : -1;
+}
+// No driver on it (just back from another PC): the command goes straight to it over USB.
+static int rtk_drop_via_usb(const char *busid) {
+    char node[64];
+    snprintf(node, sizeof node, "/dev/bus/usb/%03u/%03u", attr_dec(busid, "busnum"), attr_dec(busid, "devnum"));
+    int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+    unsigned int ifn = 0;
+    int ok = -1;
+    if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &ifn) == 0) {
+        unsigned char data[3] = { 0x66, 0xfc, 0x00 };
+        struct usbdevfs_ctrltransfer c = { 0x20, 0x00, 0, 0, 3, 1000, data };   // HCI command to the Bluetooth interface
+        ok = ioctl(fd, USBDEVFS_CONTROL, &c) == 3 ? 0 : -1;
+        ioctl(fd, USBDEVFS_RELEASEINTERFACE, &ifn);
+    }
+    close(fd);
+    return ok;
+}
+// Before it goes to another PC. Its port is claimed meanwhile, so it comes back unused here.
+static void rtk_clean_before_export(const char *busid) {
+    if (!is_realtek_bt(busid)) return;
+    unsigned devnum = attr_dec(busid, "devnum");
+    int fd = claim_port(busid);
+    if (fd < 0) return;
+    if (rtk_drop_via_hci(busid) == 0 && wait_reenumerated(busid, devnum, 4000)) logm("[%s] cleared its firmware before handing it over (starts faster there)", busid);
+    close(fd);                                       // (closing the file ends the port claim)
+}
+// Back from another PC, still without a driver here: it restarts clean and its driver here loads it at once.
+static int rtk_clean_on_return(const char *busid) {
+    if (!dev_present(busid) || !is_realtek_bt(busid)) return 0;
+    char p[PATH_MAX]; struct stat st;
+    snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
+    if (lstat(p, &st) == 0) return 0;               // a driver here has it already: leave it alone
+    unsigned devnum = attr_dec(busid, "devnum");
+    if (rtk_drop_via_usb(busid) == 0 && wait_reenumerated(busid, devnum, 4000)) { logm("[%s] cleared the other PC's firmware: it starts at once here", busid); return 1; }
+    return 0;
+}
+
+// usbip-host's list of bus ids it may take (match_busid). Taking one off the list while usbip-host
+// still has the device marks it "removed" for good: the kernel then refuses that bus id until
+// usbip-host is reloaded. So the device is always let go of first.
+static void stub_forget(const char *busid) {
+    char v[64];
+    if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
+    snprintf(v, sizeof v, "del %s", busid);
+    write_sysfs(STUB "/match_busid", v);
+}
 static int stub_bind(const char *busid) {
     char p[PATH_MAX], v[64];
     if (is_system_drive_now(busid)) { logm("[%s] refused: holds the running system", busid); return -1; }
-    snprintf(v, sizeof v, "add %s", busid);
-    if (write_sysfs(STUB "/match_busid", v) < 0) { logm("[%s] match_busid add failed: %s", busid, strerror(errno)); return -1; }
-    snprintf(p, sizeof p, USBDEV "/%s/driver/unbind", busid);
-    write_sysfs(p, busid);                         // detach from its normal driver (if any)
-    usb_reset_now(busid);                          // hand it over clean (see usb_reset_now)
-    if (write_sysfs(STUB "/bind", busid) < 0) {
+    rtk_clean_before_export(busid);
+    for (int attempt = 0; ; attempt++) {
+        snprintf(v, sizeof v, "add %s", busid);
+        if (write_sysfs(STUB "/match_busid", v) < 0) { logm("[%s] match_busid add failed: %s", busid, strerror(errno)); return -1; }
+        snprintf(p, sizeof p, USBDEV "/%s/driver/unbind", busid);
+        write_sysfs(p, busid);                         // detach from its normal driver (if any)
+        usb_reset_now(busid);                          // hand it over clean (see usb_reset_now)
+        if (write_sysfs(STUB "/bind", busid) == 0) return 0;
+        if (attempt > 0 || errno != ENODEV) break;
+        // The kernel may still have this bus id marked "removed" (left that way by an older
+        // version, or by usbip's own tools): clear it ("rebind" gives the device its own driver
+        // back and takes the bus id off the list), then try once more.
+        logm("[%s] usbip-host refused it: clearing its old entry and trying again", busid);
+        write_sysfs(STUB "/rebind", busid);
+        // "rebind" gives it its own driver again, which may make it restart (drop off USB and come
+        // back): wait until it has stayed the same device, with a driver, for 2 seconds (at most 20).
+        char dp[PATH_MAX]; struct stat dst;
+        snprintf(dp, sizeof dp, USBDEV "/%s/driver", busid);
+        unsigned long long t0 = mono_ms(), since = 0; unsigned dn = 0;
+        while (mono_ms() - t0 < 20000) {
+            int up = dev_present(busid) && lstat(dp, &dst) == 0;
+            unsigned d = up ? attr_dec(busid, "devnum") : 0;
+            if (!up || d != dn) { dn = d; since = mono_ms(); }
+            else if (mono_ms() - since >= 2000) break;
+            usleep(100000);
+        }
+        if (!dev_present(busid)) { logm("[%s] isn't back yet", busid); return -1; }
+        rtk_clean_before_export(busid);              // its driver here loaded it again
+    }
+    {
         int e = errno;
         char dl[PATH_MAX] = "", dp[PATH_MAX];
         snprintf(dp, sizeof dp, USBDEV "/%s/driver", busid);
         ssize_t n = readlink(dp, dl, sizeof dl - 1);
         if (n > 0) dl[n] = 0;
         logm("[%s] bind to usbip-host failed: %s (driver now: %s)", busid, strerror(e), n > 0 ? (strrchr(dl, '/') ? strrchr(dl, '/') + 1 : dl) : "none");
-        snprintf(v, sizeof v, "del %s", busid); write_sysfs(STUB "/match_busid", v);
+        stub_forget(busid);
         write_sysfs("/sys/bus/usb/drivers_probe", busid);
         return -1;
     }
-    return 0;
 }
 
 static void return_to_host(const char *busid) {
     char v[64], p[PATH_MAX], drv[PATH_MAX];
     if (is_system_drive_now(busid)) return;       // never re-probed: it is in use by this PC right now
-    if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
-    snprintf(v, sizeof v, "del %s", busid);
-    write_sysfs(STUB "/match_busid", v);           // so a replug binds to the normal driver
+    stub_forget(busid);                            // so a replug binds to the normal driver
+    if (rtk_clean_on_return(busid)) return;         // restarted clean: Linux set it up again by itself
     // Left unconfigured while its port was claimed (claim_port): set it up from scratch.
     read_attr(busid, "bConfigurationValue", v, sizeof v);
     snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
@@ -312,8 +430,7 @@ static void restart_watch_start(HostDev *h) {
 static void host_end_hold(HostDev *h) {
     release_claim(h);
     if (h->restart_until && !dev_present(h->busid)) {
-        char v[64]; snprintf(v, sizeof v, "del %s", h->busid);
-        write_sysfs(STUB "/match_busid", v);
+        stub_forget(h->busid);
         h->returning = 1; h->blocked = 1;
     } else return_to_host(h->busid);
     h->restart_until = 0; h->reserve_until = 0;
@@ -707,8 +824,7 @@ static void host_tick(void) {
                     continue;
                 }
                 logm("[%s] device unplugged while %s was using it. It will come back to this PC when plugged in.", h->busid, h->peer);
-                char v[64]; snprintf(v, sizeof v, "del %s", h->busid);
-                write_sysfs(STUB "/match_busid", v);
+                stub_forget(h->busid);
                 h->exported = 0; h->returning = 1; h->blocked = 1;
                 continue;
             }

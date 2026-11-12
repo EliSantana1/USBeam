@@ -488,7 +488,9 @@ static void *client_main(void *arg) {
     (void)arg;
     while (!g_stop) {
         client_tick();
-        for (int k = 0; k < 10 && !g_stop; k++) usleep(100000);
+        // About once a second; sooner when a device is due to be connected, or was connected a
+        // moment ago (it may restart itself: reconnecting it quickly matters then).
+        for (int k = 0; k < 10 && !g_stop && !client_hurry(); k++) usleep(100000);
     }
     return NULL;
 }
@@ -911,8 +913,10 @@ static void *host_main(void *arg) {
                 close(s);   // after an export the kernel holds its own reference
             }
         }
-        time_t now = time(NULL);
-        if (now != last_tick) { last_tick = now; host_lock(); host_tick(); host_unlock(); }
+        // Checks at most 250 ms apart: a restarting device, a let-go device or a countdown is
+        // noticed at once (they're cheap: a few files per shared device).
+        (void)last_tick;
+        host_lock(); host_tick(); host_unlock();
         if (g_bt_hostdirty) { g_bt_hostdirty = 0; save_settings(); }   // an adapter's pairings went out or came back (btkeys.h)
     }
     return NULL;

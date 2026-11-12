@@ -512,7 +512,7 @@ static void client_tick(void) {
             g_use[i].port = -1; g_use[i].ended_at = now;
             if (restarted) {
                 g_use[i].want = 1; g_use[i].restarts++;
-                g_use[i].restart_until = now + 20000; g_use[i].next_try = now + 1500;
+                g_use[i].restart_until = now + 20000; g_use[i].next_try = now + 300;
             } else {
                 g_use[i].restarts = 0; g_use[i].restart_until = 0;
                 if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
@@ -601,7 +601,7 @@ static void client_tick(void) {
             g_use[i].port = port;
             if (port >= 0) { g_use[i].attached_at = now; g_use[i].give_until = 0; g_use[i].restart_until = 0; }
             snprintf(g_use[i].ip, sizeof g_use[i].ip, "%s", ip);
-            if (port < 0 && g_use[i].restart_until) g_use[i].next_try = now + 1500;   // not back yet: try again shortly
+            if (port < 0 && g_use[i].restart_until) g_use[i].next_try = now + 400;    // not back yet: try again shortly
             else if (port < 0) {
                 if (!g_use[i].autorc || !fail_get(u.pc, u.busid, now)) fail_set(u.pc, u.busid, plat_attach_error(), now);
                 g_use[i].next_try = now + 3000;
@@ -612,6 +612,21 @@ static void client_tick(void) {
         if (port >= 0) { cl_lock(); fail_clear(u.pc, u.busid); cl_unlock(); logm("[%s] attached from %s on port %d", u.busid, ip, port); plat_tune(); }
     }
     if (changed) client_save();
+}
+
+// A device is due to be connected now, or was connected moments ago (client_main ticks sooner).
+static int client_hurry(void) {
+    unsigned long long now = now_ms();
+    int r = 0;
+    cl_lock();
+    for (int i = 0; i < CL_MAXW && !r; i++) {
+        Use *u = &g_use[i];
+        if (!u->used) continue;
+        if (u->want && u->port < 0 && !u->release && u->next_try <= now && (u->restart_until || u->give_until)) r = 1;
+        if (u->port >= 0 && u->attached_at && now - u->attached_at < 12000) r = 1;
+    }
+    cl_unlock();
+    return r;
 }
 
 // Sleep and wake (the platform calls these when the PC is about to sleep or hibernate, and after).
