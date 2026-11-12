@@ -23,6 +23,11 @@ drives, security keys: one click to use them on another PC, one click to give th
 - **Simple app, no terminal.** A window and a tray icon, light and dark theme. USBeam starts
   with your computer and stays out of the way.
 - **Auto-reconnect** (optional) brings a device back after sleep or a network drop.
+- **Bluetooth adapters keep their pairings** when they move between paired Linux PCs: headsets
+  and other devices paired to the adapter work on the other PC without pairing again, and
+  connect again by themselves. Linux to Linux only: Windows can't take or share pairings.
+- **Update notices.** The app tells you when a new version is out; you can update right away
+  or skip that version.
 - **Open standard.** Uses USB/IP, so it also works with Linux's built-in USB/IP
   support and with [usbip-win2](https://github.com/vadimgrn/usbip-win2).
 
