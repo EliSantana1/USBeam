@@ -312,8 +312,10 @@ static int bt_busctl(const char *const args[], char *out, size_t n, int timeout_
         if (out && got + 1 < n) { size_t k = (size_t)r; if (k > n - 1 - got) k = n - 1 - got; memcpy(out + got, buf, k); got += k; out[got] = 0; }
     }
     close(pfd[0]);
-    int st = 0;
-    if (waitpid(pid, &st, WNOHANG) == 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); return -1; }
+    // Its output ends a moment before it has finished: wait for that (within the time limit).
+    int st = 0; pid_t w;
+    while ((w = waitpid(pid, &st, WNOHANG)) == 0 && now_ms() < end) usleep(5000);
+    if (w == 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); return -1; }
     return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
 }
 static void bt_dev_path(char out[64], int hci, const char *dev) {
