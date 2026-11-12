@@ -312,12 +312,17 @@ static int rtk_clean_on_return(const char *busid) {
     return 0;
 }
 
-// usbip-host's list of bus ids it may take (match_busid). Taking one off the list while usbip-host
-// still has the device marks it "removed" for good: the kernel then refuses that bus id until
-// usbip-host is reloaded. So the device is always let go of first.
+// usbip-host's list of bus ids it may take (match_busid). How Linux handles that list:
+//  - "del" while usbip-host has the device marks the entry "removed" for good (the kernel then
+//    refuses that bus id until usbip-host is reloaded); "del" after letting go does nothing.
+//  - "rebind" right after letting go of the device (what usbip's own tools do) takes the entry
+//    off the list and gives the device its own drivers. Only then: usbip-host must still know
+//    that very device (a device that arrived since is unknown to it).
+// An entry left on the list after a device left the bus is harmless: Linux's own USB driver is
+// always tried first for a device that arrives; the next "rebind" or "del" removes it.
 static void stub_forget(const char *busid) {
     char v[64];
-    if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
+    if (bound_to_stub(busid) && write_sysfs(STUB "/unbind", busid) == 0 && write_sysfs(STUB "/rebind", busid) == 0) return;
     snprintf(v, sizeof v, "del %s", busid);
     write_sysfs(STUB "/match_busid", v);
 }
@@ -369,8 +374,12 @@ static int stub_bind(const char *busid) {
 static void return_to_host(const char *busid) {
     char v[64], p[PATH_MAX], drv[PATH_MAX];
     if (is_system_drive_now(busid)) return;       // never re-probed: it is in use by this PC right now
-    stub_forget(busid);                            // so a replug binds to the normal driver
-    if (rtk_clean_on_return(busid)) return;         // restarted clean: Linux set it up again by itself
+    // A Realtek Bluetooth adapter: its firmware is cleared first, while no driver has it here.
+    if (is_realtek_bt(busid)) {
+        if (bound_to_stub(busid)) write_sysfs(STUB "/unbind", busid);
+        if (rtk_clean_on_return(busid)) return;     // restarted clean: Linux set it up again by itself
+    }
+    stub_forget(busid);                            // off usbip-host's list; its own drivers take it
     // Left unconfigured while its port was claimed (claim_port): set it up from scratch.
     read_attr(busid, "bConfigurationValue", v, sizeof v);
     snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
