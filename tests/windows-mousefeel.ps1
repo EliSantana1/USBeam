@@ -12,8 +12,11 @@ $notes = New-Object System.Collections.Generic.List[string]
 function Note($m) { Say $m; $notes.Add($m) }
 
 Say "== usbip-win2 driver"
-$p = Start-Process -FilePath $Usbip -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist"' -PassThru
-if (-not $p.WaitForExit(600000)) { Note 'FAIL: the usbip-win2 installer did not finish'; exit 1 }
+# (No -Usbip: on a PC that already has it, it's used as it is.)
+if ($Usbip) {
+    $p = Start-Process -FilePath $Usbip -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist"' -PassThru
+    if (-not $p.WaitForExit(600000)) { Note 'FAIL: the usbip-win2 installer did not finish'; exit 1 }
+}
 $u = 'C:\Program Files\USBip\usbip.exe'
 if (-not (Test-Path $u)) { Note 'FAIL: usbip.exe missing'; exit 1 }
 

@@ -2,16 +2,17 @@
 # Upgrade / second-launch / uninstall test for the Windows installer, run by GitHub Actions
 # (as an administrator, no one at the screen).
 #
-#   tests\windows-upgrade.ps1 <previous release setup.exe> <new setup.exe> <new version>
+#   tests\windows-upgrade.ps1 <previous release setup.exe> <new setup.exe> <new version> [-KeepDriver]
+#   (-KeepDriver: on a PC that uses usbip-win2 itself, the uninstall leaves the driver in place)
 #
 # Installs the previous release, updates it the way the app's Update button does, starts the app
 # again a few times, then uninstalls. After each step it checks for leftovers: installers still
 # running, extra copies of the app or service, files and settings left behind.
-param([string]$Old, [string]$New, [string]$NewVersion, [string]$Usbip)
+param([string]$Old, [string]$New, [string]$NewVersion, [string]$Usbip, [switch]$KeepDriver)
 $ErrorActionPreference = 'Continue'
 $script:Fail = $false
 $AppKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6D2C1B54-7E7A-4F1B-9B5D-3E1F0A9C5B21}_is1'
-$Logs = Join-Path $env:RUNNER_TEMP 'usbeam-test-logs'
+$Logs = Join-Path $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }) 'usbeam-test-logs'
 New-Item -ItemType Directory -Force $Logs | Out-Null
 
 function Say($m) { Write-Host ''; Write-Host "== $m" }
@@ -48,11 +49,16 @@ function CheckClean {
 Say "0. Install the usbip-win2 driver first, silently"
 # The USBeam installer shows a message before it installs the driver itself, which would wait for a
 # click here. With the driver already in place it skips that (and so does the previous release).
-$p = Start-Process -FilePath $Usbip -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist"' -PassThru
-$null = $p.Handle
-if (-not $p.WaitForExit(600000)) { Fail 'the usbip-win2 installer did not finish in 10 minutes'; exit 1 }
+# (No -Usbip: on a PC that already has it, it is used as it is.)
+$code = '(already installed)'
+if ($Usbip) {
+    $p = Start-Process -FilePath $Usbip -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=compact /TASKS="vcredist"' -PassThru
+    $null = $p.Handle
+    if (-not $p.WaitForExit(600000)) { Fail 'the usbip-win2 installer did not finish in 10 minutes'; exit 1 }
+    $code = $p.ExitCode
+}
 $ctl = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'ROOT\USBIP_WIN2\UDE' })
-Write-Host "usbip-win2 installer exit code $($p.ExitCode); virtual USB controllers: $($ctl.Count)"
+Write-Host "usbip-win2 installer exit code $code; virtual USB controllers: $($ctl.Count)"
 if ($ctl.Count -ne 1) { Fail "usbip-win2 isn't working on this test machine ($($ctl.Count) controllers), so USBeam can't be installed here"; exit 1 }
 
 Say "1. Install the previous release ($(Split-Path $Old -Leaf))"
@@ -86,7 +92,7 @@ WaitFor 'the downloaded installer was left in the temporary folder' 90 { -not (T
 
 Say "5. Uninstall"
 $dir = AppDir
-$env:USBEAM_REMOVE_DRIVER = '1'     # remove the driver too, without asking (no one to click)
+if ($KeepDriver) { $env:USBEAM_KEEP_DRIVER = '1' } else { $env:USBEAM_REMOVE_DRIVER = '1' }   # without asking (no one to click)
 RunSetup (Join-Path $dir 'unins000.exe') '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' 'uninstall.log'
 # The uninstaller restarts itself from the temporary folder: wait until it is really done.
 WaitFor 'the uninstaller did not finish' 300 { -not (Test-Path $AppKey) -and -not (Get-Process | Where-Object { $_.Name -like '_iu*' }) } | Out-Null
