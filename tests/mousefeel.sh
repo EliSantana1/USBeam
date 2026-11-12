@@ -13,15 +13,28 @@ cd "$(dirname "$0")/.." || exit 1
 OUT=$(mktemp)
 exec > >(tee -a "$OUT") 2>&1
 note() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=Mouse feel test::$(tail -n 80 "$OUT" | sed 's/%/%25/g; s/\r//g' | awk 'BEGIN{ORS="%0A"} {print}')"; }
-trap note EXIT
+# At the end: the time limit below and the background jobs stop too (nothing keeps running after it).
+# (Each job first, then what it started: stopped the other way round, the time limit would fire.)
+done_bg() {
+    local j kids
+    for j in ${WD:-} ${HOSTJOB:-}; do
+        kids=$(pgrep -P "$j")
+        kill "$j" 2>/dev/null
+        [ -n "$kids" ] && kill $kids 2>/dev/null
+    done
+    return 0
+}
+trap 'note; done_bg' EXIT
 trap 'echo "FAIL: the test took over 8 minutes"; exit 1' TERM
-( sleep 480; kill -TERM $$ ) 2>/dev/null &
+{ sleep 480; kill -TERM $$; } >/dev/null 2>&1 &
+WD=$!
 N=3000
 fail() { echo "FAIL: $*"; cleanup; exit 1; }
 G=/sys/kernel/config/usb_gadget/usbeamtest
 cleanup() {
     pkill -f "build/usbeam use 10.77.0.2" 2>/dev/null; sleep 1
     ip netns pids usbeamhost 2>/dev/null | xargs -r kill 2>/dev/null; sleep 1
+    [ -n "${HOSTJOB:-}" ] && { pkill -P "$HOSTJOB"; kill "$HOSTJOB"; } 2>/dev/null
     ip netns del usbeamhost 2>/dev/null
     if [ -d $G ]; then echo "" > $G/UDC 2>/dev/null; rm -f $G/configs/c.1/hid.usb0; rmdir $G/configs/c.1/strings/0x409 $G/configs/c.1 $G/functions/hid.usb0 $G/strings/0x409 $G 2>/dev/null; fi
 }
@@ -87,6 +100,7 @@ ping -c 20 -i 0.05 -q 10.77.0.2 | tail -1
 echo "== USBeam sharing it (other side)"
 LOG=$(mktemp -d)
 (tail -f /dev/null | ip netns exec usbeamhost build/usbeam host >"$LOG/host" 2>&1) &   # (it quits when its input ends)
+HOSTJOB=$!
 sleep 2
 
 run() {   # $1 = label, $2 = 1 for the old way

@@ -18,9 +18,21 @@ cd "$(dirname "$0")/.." || exit 1
 OUT=$(mktemp)
 exec > >(tee -a "$OUT") 2>&1
 note() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice title=Restart test::$(tail -n 140 "$OUT" | sed 's/%/%25/g; s/\r//g' | awk 'BEGIN{ORS="%0A"} {print}')"; }
-trap note EXIT
+# At the end: the time limit below and the background jobs stop too (nothing keeps running after it).
+# (Each job first, then what it started: stopped the other way round, the time limit would fire.)
+done_bg() {
+    local j kids
+    for j in ${WD:-} ${HOSTJOB:-}; do
+        kids=$(pgrep -P "$j")
+        kill "$j" 2>/dev/null
+        [ -n "$kids" ] && kill $kids 2>/dev/null
+    done
+    return 0
+}
+trap 'note; done_bg' EXIT
 trap 'echo "FAIL: the test took over 8 minutes"; exit 1' TERM
-( sleep 480; kill -TERM $$ ) 2>/dev/null &
+{ sleep 480; kill -TERM $$; } >/dev/null 2>&1 &
+WD=$!
 G=/sys/kernel/config/usb_gadget/usbeamrestart
 LOG=$(mktemp -d)
 fails=0
@@ -29,6 +41,7 @@ stop_use() { pkill -f "build/usbeam use 10.78.0.2" 2>/dev/null; sleep 2; }
 cleanup() {
     stop_use
     ip netns pids usbeamrs 2>/dev/null | xargs -r kill 2>/dev/null; sleep 1
+    [ -n "${HOSTJOB:-}" ] && { pkill -P "$HOSTJOB"; kill "$HOSTJOB"; } 2>/dev/null
     ip netns del usbeamrs 2>/dev/null
     if [ -d $G ]; then echo "" > $G/UDC 2>/dev/null; rm -f $G/configs/c.1/hid.usb0; rmdir $G/configs/c.1/strings/0x409 $G/configs/c.1 $G/functions/hid.usb0 $G/strings/0x409 $G 2>/dev/null; fi
 }
@@ -95,6 +108,7 @@ ip addr add 10.78.0.1/24 dev usbeamr0; ip link set usbeamr0 up
 ip netns exec usbeamrs ip addr add 10.78.0.2/24 dev usbeamr1
 ip netns exec usbeamrs ip link set usbeamr1 up; ip netns exec usbeamrs ip link set lo up
 (tail -f /dev/null | ip netns exec usbeamrs build/usbeam host >"$LOG/host" 2>&1) &   # (it quits when its input ends)
+HOSTJOB=$!
 sleep 2
 use() { build/usbeam use 10.78.0.2 "$BUSID" >>"$LOG/use" 2>&1 & wait_for there 30 || fail "the device didn't arrive on the using side"; }
 
