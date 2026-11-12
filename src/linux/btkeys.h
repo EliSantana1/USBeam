@@ -31,7 +31,7 @@
 #define BT_MAXBLOB (32 + BT_MAXDEV * (17 + 4 + BT_MAXINFO))
 #define BT_MAXSESS 16
 #define BT_NOTE_LINUX "its Bluetooth pairings go with it to Linux PCs paired with this one (not to Windows PCs: Windows can't take them)"
-enum { BTC_GET = 1, BTC_PUT = 2 };
+enum { BTC_GET = 1, BTC_PUT = 2, BTC_LEAVE = 3 };   // LEAVE: its own PC takes it back: disconnect what is connected through it
 enum { BTS_NONE = 0, BTS_HERE = 1, BTS_SEND = 2 };   // pairings put in place here / to be sent back
 
 static char g_bt_store[64] = "/var/lib/bluetooth";
@@ -101,6 +101,7 @@ typedef struct {
     char conn[BT_MAXCONN][18]; int nconn;   // connected through it, as last seen on this PC
     char want[BT_MAXCONN][18]; int nwant;   // to connect again here (received with its pairings)
     unsigned long long want_until, next_try;
+    unsigned long long keep_until;          // disconnected for a move: conn stays as it was until then
     int busy;                               // a connect attempt is running (bt_connect_main)
 } BtConn;
 static BtConn g_btc[BT_MAXSESS];
@@ -357,7 +358,7 @@ static void bt_snapshot(const char *addr, int hci, char devs[BT_MAXCONN][18], in
     for (int k = 0; k < nd; k++) conn[k] = bt_is_connected(hci, devs[k]);
     pthread_mutex_lock(&g_bt_mx);
     BtConn *c = bt_conn(addr, 1);
-    if (c) { c->nconn = 0; for (int k = 0; k < nd; k++) if (conn[k]) snprintf(c->conn[c->nconn++], 18, "%s", devs[k]); }
+    if (c && now_ms() >= c->keep_until) { c->nconn = 0; for (int k = 0; k < nd; k++) if (conn[k]) snprintf(c->conn[c->nconn++], 18, "%s", devs[k]); }
     pthread_mutex_unlock(&g_bt_mx);
     *ndp = nd;
 }
@@ -366,6 +367,33 @@ static void bt_snapshot_now(const char *addr) {
     if (hci < 0) return;
     char devs[BT_MAXCONN][18]; int conn[BT_MAXCONN] = {0}, nd = 0;
     bt_snapshot(addr, hci, devs, conn, &nd);
+}
+
+// The adapter is about to move to another PC: disconnect what is connected through it, properly.
+// Otherwise those devices only notice it's gone after their own timeout (often 20 s), and until
+// then they don't answer the other PC. Which ones were connected is kept (keep_until), so they are
+// connected again where it goes. Takes at most about 4 s. Returns how many were disconnected.
+static int bt_leave(const char *addr) {
+    int hci = bt_hci_of(addr);
+    if (hci < 0) return 0;                       // not working on this PC
+    char devs[BT_MAXCONN][18]; int conn[BT_MAXCONN] = {0}, nd = 0;
+    bt_snapshot(addr, hci, devs, conn, &nd);
+    char list[BT_MAXCONN][18]; int n = 0;
+    pthread_mutex_lock(&g_bt_mx);
+    BtConn *c = bt_conn(addr, 1);
+    if (c) { c->keep_until = now_ms() + 60000; for (int k = 0; k < c->nconn; k++) snprintf(list[n++], 18, "%s", c->conn[k]); }
+    pthread_mutex_unlock(&g_bt_mx);
+    unsigned long long end = now_ms() + 4000;
+    int done = 0;
+    for (int k = 0; k < n; k++) {
+        unsigned long long now = now_ms();
+        if (now >= end) break;
+        char path[64]; bt_dev_path(path, hci, list[k]);
+        const char *a[] = { "--system", "--timeout=3", "call", "org.bluez", path, "org.bluez.Device1", "Disconnect", NULL };
+        if (bt_busctl(a, NULL, 0, (int)((end - now + 999) / 1000)) == 0) done++;
+    }
+    if (n) logm("Bluetooth: disconnected %d of %d device(s) connected through adapter %s before it moves (so they connect again at once where it goes)", done, n, addr);
+    return done;
 }
 
 // Every 2 s (every half second while something is waiting to be connected again), for the
@@ -398,7 +426,10 @@ static void bt_conn_tick(void) {
         BtConn *c = bt_conn(addrs[i], 1);
         if (c) {
             // Connect again what was connected where it came from (one device at a time).
-            if (c->nwant && now >= c->want_until) c->nwant = 0;
+            if (c->nwant && now >= c->want_until) {
+                for (int k = 0; k < c->nwant; k++) if (c->want[k][0]) logm("Bluetooth device %s didn't connect again through the adapter that came here (gave up after 90 s)", c->want[k]);
+                c->nwant = 0;
+            }
             if (c->nwant && !c->busy && now >= c->next_try) {
                 int pick = -1, left = 0;
                 for (int k = 0; k < c->nwant; k++) {
@@ -498,6 +529,7 @@ static int bt_get_ok(const char *peer, const char *busid, HostDev **hp, char add
 // A request from another PC (paired PCs only): GET = send the adapter's pairings; PUT = take them back.
 // Request: its id (40), command (1), busid length (1), busid. Then a challenge it must answer, as for
 // pair.h's requests. Status byte: 0 = ok, 1 = not paired, 2 = failed the check, 3 = not available.
+static BtSess *bt_sess(const char *pc, const char *busid, int create);
 static void bt_server(plat_sock s, const char *peer, const uint8_t *op) {
     uint32_t len = cl_g32(op + 4);
     uint8_t m[128];
@@ -543,8 +575,25 @@ static void bt_server(plat_sock s, const char *peer, const uint8_t *op) {
         bt_pack(addr, &plain);
         st = 0;
         if (!bt_seal(&sealed, k, &plain)) { pr_reply(s, OP_REP_BT, &st, 1); bt_send_blob(s, &sealed); }
-        logm("[%s] its Bluetooth pairings went to %s with it", busid, peer);
+        int nc = 0;
+        pthread_mutex_lock(&g_bt_mx);
+        BtConn *c = bt_conn(addr, 0);
+        if (c) nc = c->nconn;
+        pthread_mutex_unlock(&g_bt_mx);
+        logm("[%s] its Bluetooth pairings went to %s with it (%d device(s) connected through it go along)", busid, peer, nc);
         crypto_wipe(plain.p, plain.len); sb_free(&plain); sb_free(&sealed);
+        // Before it goes (that PC asks for it next). If it doesn't go after all, they are connected
+        // here again in a moment; if it goes, this PC can't reach them any more by then.
+        if (nc && bt_leave(addr)) {
+            pthread_mutex_lock(&g_bt_mx);
+            c = bt_conn(addr, 0);
+            if (c) {
+                c->nwant = 0;
+                memcpy(c->want, c->conn, sizeof c->want); c->nwant = c->nconn;
+                c->want_until = now_ms() + 90000; c->next_try = now_ms() + 10000;
+            }
+            pthread_mutex_unlock(&g_bt_mx);
+        }
     } else if (cmd == BTC_PUT) {
         // Only from the PC that last had the adapter's pairings, and only for that adapter.
         host_lock();
@@ -576,6 +625,15 @@ static void bt_server(plat_sock s, const char *peer, const uint8_t *op) {
             host_unlock();
             logm("[%s] its Bluetooth pairings came back from %s%s", busid, peer, changed ? " (with changes)" : "");
         } else logm("[%s] %s sent Bluetooth pairings that couldn't be used", busid, peer);
+    } else if (cmd == BTC_LEAVE) {
+        // Its own PC is taking the adapter back: disconnect what is connected through it first.
+        pthread_mutex_lock(&g_bt_mx);
+        BtSess *b = bt_sess(id, busid, 0);
+        if (b && b->state == BTS_HERE) snprintf(addr, sizeof addr, "%s", b->addr);
+        pthread_mutex_unlock(&g_bt_mx);
+        if (addr[0]) bt_leave(addr);
+        st = addr[0] ? 0 : 4;
+        pr_reply(s, OP_REP_BT, &st, 1);
     } else { st = 3; pr_reply(s, OP_REP_BT, &st, 1); }
     crypto_wipe(k, sizeof k);
 }
@@ -693,10 +751,30 @@ static void plat_bt_before(const char *pc, const char *ip, const char *busid, in
         b = bt_sess(pc, busid, 1);
         if (b) { b->state = BTS_HERE; snprintf(b->pc, sizeof b->pc, "%s", pc); snprintf(b->busid, sizeof b->busid, "%s", busid); snprintf(b->addr, sizeof b->addr, "%s", a); }
         pthread_mutex_unlock(&g_bt_mx);
-        logm("[%s] its Bluetooth pairings are in place here", busid);
+        int nw = 0;
+        pthread_mutex_lock(&g_bt_mx);
+        BtConn *c = bt_conn(a, 0);
+        if (c) nw = c->nwant;
+        pthread_mutex_unlock(&g_bt_mx);
+        logm("[%s] its Bluetooth pairings are in place here (%d device(s) to connect again)", busid, nw);
         g_cl_dirty = 1;
     }
     crypto_wipe(blob, n); free(blob);
+}
+// About to let go of the adapter (released here, or this PC goes to sleep or stops): disconnect
+// what is connected through it first (see bt_leave).
+static void plat_bt_leaving(const char *pc, const char *busid) {
+    char addr[18] = "";
+    pthread_mutex_lock(&g_bt_mx);
+    BtSess *b = bt_sess(pc, busid, 0);
+    if (b && b->state == BTS_HERE) snprintf(addr, sizeof addr, "%s", b->addr);
+    pthread_mutex_unlock(&g_bt_mx);
+    if (addr[0]) bt_leave(addr);
+}
+// Its own PC takes it back: it asks this PC to disconnect them first (BTC_LEAVE). A moment at most.
+static void bt_ask_leave(const char *pc, const char *ip, const char *busid) {
+    int st = bt_request(pc, ip, BTC_LEAVE, busid, NULL, NULL, NULL);
+    if (st != 0) logm("[%s] the PC using it didn't disconnect its Bluetooth devices first (%d): they connect again here after their own timeout", busid, st);
 }
 // The adapter left this PC (released, taken back, connection lost...): its pairings go back (bt_tick).
 static void plat_bt_after(const char *pc, const char *busid) {

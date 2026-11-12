@@ -159,6 +159,7 @@ static void plat_tune(void) { tune_drives(); }
 // Bluetooth pairings that go with a Bluetooth adapter (btkeys.h, after pair.h).
 static void plat_bt_before(const char *pc, const char *ip, const char *busid, int again);
 static void plat_bt_after(const char *pc, const char *busid);
+static void plat_bt_leaving(const char *pc, const char *busid);
 static void plat_bt_tick(void);
 #define PLAT_BT_SYNC 1                 // this PC can take a Bluetooth adapter's pairings
 #include "../common/client.h"
@@ -789,6 +790,15 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         // Back to this PC; still shared (only "Don't share" stops that). The PC it came from is told,
         // so its Auto-reconnect doesn't take it straight back.
         // (If that PC isn't known by its USBeam id, it's kept here instead, as before.)
+        if (h && h->exported && h->bt_peer[0] && h->btaddr[0]) {
+            // A Bluetooth adapter: the PC using it disconnects what is connected through it first.
+            char bpc[40], bip[64];
+            snprintf(bpc, sizeof bpc, "%s", h->bt_peer); snprintf(bip, sizeof bip, "%s", h->peer);
+            host_unlock();                     // a moment over the network: other PCs carry on meanwhile
+            bt_ask_leave(bpc, bip, id);
+            host_lock();
+            h = hdev(id, 0);
+        }
         if (h && (h->exported || host_held(h))) {
             if (host_held(h)) host_end_hold(h); else host_let_go(h);
             h->exported = 0;

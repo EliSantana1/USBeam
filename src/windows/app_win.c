@@ -84,6 +84,7 @@ static void plat_tune(void) {}
 // way and runs one Bluetooth adapter at a time (the Linux side: src/linux/btkeys.h).
 static void plat_bt_before(const char *pc, const char *ip, const char *busid, int again) { (void)pc; (void)ip; (void)busid; (void)again; }
 static void plat_bt_after(const char *pc, const char *busid) { (void)pc; (void)busid; }
+static void plat_bt_leaving(const char *pc, const char *busid) { (void)pc; (void)busid; }
 static void plat_bt_tick(void) {}
 #define PLAT_BT_SYNC 0
 

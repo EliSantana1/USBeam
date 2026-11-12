@@ -479,6 +479,7 @@ static void client_tick(void) {
         cl_unlock();
         if (!u.used) continue;
         if (u.release) {
+            if (u.port >= 0) plat_bt_leaving(u.pc, u.busid);
             if (u.port >= 0) plat_detach(u.port);
             plat_stop_retries();
             plat_bt_after(u.pc, u.busid);
@@ -491,6 +492,7 @@ static void client_tick(void) {
             now - u.attached_at >= (unsigned long long)g_input_release * 60000ULL) {
             // Auto-release for keyboards and mice (gear menu): give it back to its own PC.
             logm("[%s] released automatically after %d minutes (keyboards and mice)", u.busid, g_input_release);
+            plat_bt_leaving(u.pc, u.busid);              // (a Bluetooth adapter: see btkeys.h)
             plat_detach(u.port);
             plat_stop_retries();
             plat_bt_after(u.pc, u.busid);
@@ -634,12 +636,17 @@ static int client_hurry(void) {
 // has one), so every one is let go first. Each goes back to its own PC; those with Auto-reconnect
 // come back here by themselves after waking, the others stay there.
 static void client_sleep(void) {
-    int ports[CL_MAXW], n = 0;
+    int ports[CL_MAXW], n = 0, nb = 0;
+    char bpc[CL_MAXW][40], bbus[CL_MAXW][32];
     cl_lock();
     g_cl_asleep = 1; g_cl_asleep_at = now_ms();
-    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) ports[n++] = g_use[i].port;
+    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) {
+        ports[n++] = g_use[i].port;
+        { snprintf(bpc[nb], 40, "%s", g_use[i].pc); snprintf(bbus[nb++], 32, "%s", g_use[i].busid); }
+    }
     cl_unlock();
     if (!n) return;
+    for (int k = 0; k < nb; k++) plat_bt_leaving(bpc[k], bbus[k]);
     plat_client_tick_begin();
     for (int k = 0; k < n; k++) plat_detach(ports[k]);
     plat_stop_retries();
@@ -664,7 +671,10 @@ static void client_wake(void) {
 // Release everything (quitting).
 static void client_release_all(void) {
     plat_client_tick_begin();
-    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) { plat_detach(g_use[i].port); plat_bt_after(g_use[i].pc, g_use[i].busid); }
+    for (int i = 0; i < CL_MAXW; i++) if (g_use[i].used && g_use[i].port >= 0) {
+        plat_bt_leaving(g_use[i].pc, g_use[i].busid);
+        plat_detach(g_use[i].port); plat_bt_after(g_use[i].pc, g_use[i].busid);
+    }
 }
 
 // ---------------------------------------------------------------- discovery messages

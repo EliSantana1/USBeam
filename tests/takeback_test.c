@@ -43,6 +43,7 @@ static int plat_restart_needed(void) { return 0; }
 static void plat_set_bootstart(int on) { (void)on; }
 static void plat_bt_before(const char *pc, const char *ip, const char *busid, int again) { (void)pc; (void)ip; (void)busid; (void)again; }
 static void plat_bt_after(const char *pc, const char *busid) { (void)pc; (void)busid; }
+static void plat_bt_leaving(const char *pc, const char *busid) { (void)pc; (void)busid; }
 static void plat_bt_tick(void) {}
 #define PLAT_BT_SYNC 0
 static void peer_label(const char *ip, char *out, size_t n, int cl_held) { (void)cl_held; snprintf(out, n, "%s", ip); }
