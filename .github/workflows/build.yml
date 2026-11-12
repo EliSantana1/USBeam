@@ -132,6 +132,8 @@ jobs:
         run: gcc -O2 -Wall -Werror -Wno-unused-function -pthread -o build/pair_test tests/pair_test.c && build/pair_test
       - name: Smooth-input test (a 1000 Hz mouse over a home-Wi-Fi-like link arrives smooth, complete, in order)
         run: gcc -O2 -Wall -Werror -Wno-unused-function -pthread -o build/stream_test tests/stream_test.c -lm && build/stream_test
+      - name: Restart test, using side (a device that restarts right after connecting is connected again; nothing else is grabbed)
+        run: gcc -O2 -Wall -Werror -Wno-unused-function -pthread -o build/restart_test tests/restart_test.c && build/restart_test
 
   # The real Linux kernel parts: a virtual USB mouse shared through USBeam over a delayed link.
   mouse-feel-test:
@@ -146,6 +148,9 @@ jobs:
         run: make linux
       - name: Mouse feel test (straight, complete, evenly timed movement)
         run: sudo -E bash tests/mousefeel.sh
+      - name: Restart test, sharing side (a device restarting while being set up stays with that PC; an unplug still returns it)
+        if: always()
+        run: sudo -E bash tests/restart.sh
 
   # Install the previous release, update to this build (also from inside the app), start the app
   # several times, uninstall: one app and one runtime at every step, nothing left behind.

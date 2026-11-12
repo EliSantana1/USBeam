@@ -177,6 +177,10 @@ typedef struct Dev {
     int last_shown;          // last countdown second printed
     volatile LONG busy;      // driver switch in progress
     char last_peer[64];
+    ULONGLONG exported_at;   // when its session started (GetTickCount64)
+    ULONGLONG restart_until; // restarted itself while the client set it up: waiting for it to come back (monitor_main)
+    ULONGLONG reserve_until; // came back after restarting: kept for that client (peer) until then
+    volatile LONG vanished;  // the session ended because the device left the bus
     // session (only while a client is attached)
     volatile LONG in_use;
     char peer[64];
@@ -188,6 +192,15 @@ typedef struct Dev {
     Worker *workers[257];
     volatile LONG quit;
 } Dev;
+
+// Some devices restart themselves while the PC they were given to sets them up (a Bluetooth chip
+// whose firmware gets reloaded, for example): they drop off USB and come back a moment later.
+// That is not the user unplugging it, so such a device stays with that PC. Its Windows identity
+// (and with it the bus id) includes vendor and product, so only the same kind of device qualifies.
+#define RESTART_SETUP 10000   // ms after being handed over that a restart counts as part of setting it up
+#define RESTART_BACK 5000     // ms it has to come back in
+#define RESTART_KEEP 15000    // ms it is then kept for that PC to connect it again
+#define DEV_HELD(d) ((d)->restart_until || (d)->reserve_until)
 
 static Dev g_devs[MAX_DEVS];
 static CRITICAL_SECTION g_devs_cs;
@@ -776,8 +789,21 @@ static BOOL revert_driver(Dev *d) {
     return TRUE;
 }
 
+// Stop keeping a restarted device for the PC it restarted on: it goes back on its normal driver.
+// One that hasn't come back yet counts as unplugged (it returns to this PC when it's back).
+static void end_hold(Dev *d) {
+    if (!DEV_HELD(d)) return;
+    while (InterlockedCompareExchange(&d->busy, 1, 0) != 0) Sleep(50);
+    if (DEV_HELD(d) && !d->in_use) {
+        d->restart_until = 0; d->reserve_until = 0;
+        if (!d->present) { d->returning = 1; d->blocked = 1; }
+        else if (d->on_winusb) revert_driver(d);
+    }
+    InterlockedExchange(&d->busy, 0);
+}
+
 static void end_session(Dev *d) {
-    if (!d->in_use) return;
+    if (!d->in_use) { end_hold(d); return; }
     InterlockedExchange(&d->quit, 1);
     if (d->client != INVALID_SOCKET) shutdown(d->client, SD_BOTH);
     for (int i = 0; i < 100 && d->in_use; i++) Sleep(100);
@@ -849,6 +875,7 @@ static int32_t map_err(DWORD e) {
     return E_PROTO;
 }
 static void device_vanished(Dev *d, DWORD e) {
+    InterlockedExchange(&d->vanished, 1);
     if (InterlockedExchange(&d->quit, 1) == 0) {
         say("[%s] device unplugged or stopped responding (error %lu). Ending session with %s.", d->busid, e, d->peer);
         shutdown(d->client, SD_BOTH);
@@ -1070,7 +1097,7 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         }
         EnterCriticalSection(&g_devs_cs);
         Dev *d = NULL;
-        for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use && !strcmp(g_devs[i].busid, busid)) d = &g_devs[i];
+        for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && (g_devs[i].in_use || DEV_HELD(&g_devs[i])) && !strcmp(g_devs[i].busid, busid)) d = &g_devs[i];
         if (d) { d->blocked = 1; d->hold_until = GetTickCount64() + (ULONGLONG)g_hold_secs * 1000; d->last_shown = 0; }
         LeaveCriticalSection(&g_devs_cs);
         put32(r + 4, d ? 0 : 1);
@@ -1088,12 +1115,12 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         refresh_devices();
         EnterCriticalSection(&g_devs_cs);
         int n = 0, size = 12;
-        for (int i = 0; i < MAX_DEVS; i++) { Dev *d = &g_devs[i]; if (d->used && d->present && d->wanted && !d->blocked && d->have_desc && !d->in_use) { n++; size += 312 + 4 * d->num_ifaces; } }
+        for (int i = 0; i < MAX_DEVS; i++) { Dev *d = &g_devs[i]; if (d->used && d->present && d->wanted && !d->blocked && d->have_desc && !d->in_use && !DEV_HELD(d)) { n++; size += 312 + 4 * d->num_ifaces; } }
         uint8_t *r = calloc(1, size), *p = r + 12;
         put16(r, USBIP_VERSION); put16(r + 2, OP_REP_DEVLIST); put32(r + 8, n);
         for (int i = 0; i < MAX_DEVS; i++) {
             Dev *d = &g_devs[i];
-            if (!(d->used && d->present && d->wanted && !d->blocked && d->have_desc && !d->in_use)) continue;
+            if (!(d->used && d->present && d->wanted && !d->blocked && d->have_desc && !d->in_use && !DEV_HELD(d))) continue;
             fill_device_record(d, p); p += 312;
             for (int k = 0; k < d->num_ifaces; k++) { memcpy(p, d->iface_class[k], 3); p += 4; }
         }
@@ -1115,6 +1142,16 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         refresh_devices();
         EnterCriticalSection(&g_devs_cs);
         Dev *d = find_shared(busid);
+        int again = 0;
+        if (d && DEV_HELD(d)) {     // kept after restarting itself: only for the PC it restarted on, once it's back
+            again = d->reserve_until && !strcmp(d->peer, c->peer);
+            if (!again) {
+                LeaveCriticalSection(&g_devs_cs);
+                put32(r + 4, ST_NA); send_all(s, r, 8);
+                logm("[%s] %s asked for it: kept for %s while it restarts", busid, c->peer, d->peer);
+                goto done;
+            }
+        }
         if (!d || InterlockedCompareExchange(&d->in_use, 1, 0) != 0) {
             LeaveCriticalSection(&g_devs_cs);
             put32(r + 4, ST_NA); send_all(s, r, 8);
@@ -1122,7 +1159,10 @@ static DWORD WINAPI conn_main(LPVOID arg) {
             goto done;
         }
         d->taken_from[0] = 0;
+        d->restart_until = 0; d->reserve_until = 0;
+        d->vanished = 0; d->exported_at = GetTickCount64();
         LeaveCriticalSection(&g_devs_cs);
+        for (int i = 0; i < 400 && d->busy; i++) Sleep(50);   // a driver switch still finishing (monitor_main)
         d->quit = 0;
         if (d->is_storage && !d->is_radio && !d->on_winusb && drive_in_use(d)) {
             d->drive_busy_until = GetTickCount64() + 20000;
@@ -1153,15 +1193,21 @@ static DWORD WINAPI conn_main(LPVOID arg) {
         strncpy(d->peer, c->peer, 63);
         strncpy(d->last_peer, c->peer, 63);
         d->client = s;
-        say("[%s] %ls is now in use by %s", d->busid, d->name, c->peer);
+        say("[%s] %ls is now in use by %s%s", d->busid, d->name, c->peer, again ? " again" : "");
         urb_loop(d);
         stop_workers(d);
         close_usb(d);
         d->client = INVALID_SOCKET;
-        say("[%s] %ls released by %s", d->busid, d->name, c->peer);
         InterlockedExchange(&d->busy, 1);
         refresh_devices();
-        if (d->present) {
+        if (d->vanished && !d->blocked && GetTickCount64() - d->exported_at <= RESTART_SETUP) {
+            // Most likely it restarted itself while that PC set it up: keep it for that PC. It
+            // comes back on the sharing driver (WinUSB stays assigned to it), so nothing on this
+            // PC starts using it meanwhile.
+            d->restart_until = GetTickCount64() + RESTART_BACK;
+            say("[%s] %ls restarted itself while %s was setting it up: keeping it for that PC", d->busid, d->name, c->peer);
+        } else if (d->present) {
+            say("[%s] %ls released by %s", d->busid, d->name, c->peer);
             revert_driver(d);
             say("[%s] %ls is working on this PC again.", d->busid, d->name);
         } else {

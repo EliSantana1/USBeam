@@ -38,7 +38,19 @@ typedef struct {
     time_t hold_until;   // countdown end, 0 = none
     int last_shown;
     char taken_from[40]; // USBeam id of the PC this PC took it back from ("Take back"), until it's used again
+    time_t exported_at;  // when it was handed to the client
+    unsigned exp_devnum, exp_vid, exp_pid;   // its USB address and ids then (a new address: it left the bus meanwhile)
+    time_t restart_until;  // restarted itself while the client set it up: waiting for it to come back (host_tick)
+    time_t reserve_until;  // came back after restarting: kept for that client (h->peer) until then
 } HostDev;
+
+// Some devices restart themselves while the PC they were given to sets them up (a Bluetooth chip
+// whose firmware gets reloaded, for example): they drop off USB and come back a moment later.
+// That is not the user unplugging it, so such a device stays with that PC.
+#define RESTART_SETUP 10   // s after being handed over that a restart counts as part of setting it up
+#define RESTART_BACK 5     // s it has to come back in
+#define RESTART_KEEP 15    // s it is then kept for that PC to connect it again
+static int host_held(const HostDev *h) { return h && (h->restart_until || h->reserve_until); }
 
 static HostDev g_h[MAXH];
 static int pair_import_ok(const char *ip, const char *busid);   // pair.h
@@ -211,6 +223,17 @@ static void return_to_host(const char *busid) {
     snprintf(v, sizeof v, "del %s", busid);
     write_sysfs(STUB "/match_busid", v);           // so a replug binds to the normal driver
     if (dev_present(busid)) write_sysfs("/sys/bus/usb/drivers_probe", busid);
+}
+
+// Stop keeping a restarted device for the PC it restarted on: it works on this PC again. One that
+// hasn't come back yet counts as unplugged (it returns to this PC when it's back).
+static void host_end_hold(HostDev *h) {
+    if (h->restart_until && !dev_present(h->busid)) {
+        char v[64]; snprintf(v, sizeof v, "del %s", h->busid);
+        write_sysfs(STUB "/match_busid", v);
+        h->returning = 1; h->blocked = 1;
+    } else return_to_host(h->busid);
+    h->restart_until = 0; h->reserve_until = 0;
 }
 
 // ---------------------------------------------------------------- scan for hardware changes
@@ -388,7 +411,7 @@ static int offerable(const char *busid) {
     if (!shareable(busid)) return 0;
     if (is_hidden(busid) || drive_mounted(busid)) return 0;
     if (system_reason(busid) && !is_shared(busid)) return 0;
-    if (h && (h->exported || h->blocked)) return 0;
+    if (h && (h->exported || h->blocked || host_held(h))) return 0;
     return 1;
 }
 
@@ -521,7 +544,13 @@ static void handle_import(int s, const char *peer) {
     uint8_t r[8 + 312] = {0};
     put16b(r, USBIP_VERSION); put16b(r + 2, 0x0003);
     char name[256];
-    if (!offerable(busid)) { put32b(r + 4, 1); send_all(s, r, 8); logm("%s asked for %s: not available", peer, busid); return; }
+    HostDev *held = hdev(busid, 0);
+    if (!host_held(held)) held = NULL;
+    // Kept after restarting itself (host_tick): only for the PC it restarted on, once it's back.
+    int again = held && held->reserve_until && !strcmp(held->peer, peer) && shareable(busid) && bound_to_stub(busid) &&
+                !is_hidden(busid) && (!system_reason(busid) || is_shared(busid));
+    if (held && !again) { put32b(r + 4, 1); send_all(s, r, 8); logm("[%s] %s asked for it: kept for %s while it restarts", busid, peer, held->peer); return; }
+    if (!again && !offerable(busid)) { put32b(r + 4, 1); send_all(s, r, 8); logm("%s asked for %s: not available", peer, busid); return; }
     if (!pair_import_ok(peer, busid)) {
         put32b(r + 4, 1); send_all(s, r, 8);
         logm("[%s] %s asked for it, but this PC lets only paired PCs use its devices", busid, peer);
@@ -562,8 +591,12 @@ static void handle_import(int s, const char *peer) {
     }
     HostDev *h = hdev(busid, 1);
     h->exported = 1; h->returning = 0; h->taken_from[0] = 0;
+    h->restart_until = 0; h->reserve_until = 0;
+    h->exported_at = time(NULL);
+    h->exp_devnum = attr_dec(busid, "devnum");
+    h->exp_vid = attr_hex(busid, "idVendor"); h->exp_pid = attr_hex(busid, "idProduct");
     snprintf(h->peer, sizeof h->peer, "%s", peer);
-    logm("[%s] %s is now in use by %s", busid, name, peer);
+    logm("[%s] %s is now in use by %s%s", busid, name, peer, again ? " again" : "");
 }
 
 // ---------------------------------------------------------------- periodic checks
@@ -574,7 +607,16 @@ static void host_tick(void) {
         HostDev *h = &g_h[i];
         if (!h->busid[0]) continue;
         if (h->exported) {
-            if (!dev_present(h->busid)) {
+            // Gone, or back already as a new connection (a new USB address): it left the bus.
+            if (!dev_present(h->busid) || attr_dec(h->busid, "devnum") != h->exp_devnum) {
+                if (now - h->exported_at <= RESTART_SETUP) {
+                    // Most likely it restarted itself while that PC set it up. usbip-host keeps its
+                    // claim on this port (match_busid), so when it's back it goes straight to
+                    // usbip-host, not to this PC's own driver.
+                    logm("[%s] restarted itself while %s was setting it up: keeping it for that PC", h->busid, h->peer);
+                    h->exported = 0; h->restart_until = now + RESTART_BACK;
+                    continue;
+                }
                 logm("[%s] device unplugged while %s was using it. It will come back to this PC when plugged in.", h->busid, h->peer);
                 char v[64]; snprintf(v, sizeof v, "del %s", h->busid);
                 write_sysfs(STUB "/match_busid", v);
@@ -587,6 +629,35 @@ static void host_tick(void) {
                 return_to_host(h->busid);
                 h->exported = 0;
                 logm("[%s] %s released by %s. It works on this PC again.", h->busid, dev_name(h->busid, name, sizeof name), h->peer);
+            }
+            continue;
+        }
+        if (h->restart_until) {
+            if (dev_present(h->busid)) {
+                // Back. Only the same kind of device is kept for that PC; anything else stays here.
+                if (attr_hex(h->busid, "idVendor") == h->exp_vid && attr_hex(h->busid, "idProduct") == h->exp_pid &&
+                    shareable(h->busid) && (bound_to_stub(h->busid) || stub_bind(h->busid) == 0)) {
+                    h->restart_until = 0; h->reserve_until = now + RESTART_KEEP;
+                    logm("[%s] back after restarting: waiting for %s to connect it again", h->busid, h->peer);
+                } else {
+                    h->restart_until = 0;
+                    return_to_host(h->busid);
+                    logm("[%s] a different device is on this port now: it stays on this PC", h->busid);
+                }
+            } else if (now >= h->restart_until) {
+                host_end_hold(h);             // didn't come back: it was unplugged after all
+                logm("[%s] device unplugged while %s was using it. It will come back to this PC when plugged in.", h->busid, h->peer);
+            }
+            continue;
+        }
+        if (h->reserve_until) {
+            if (!dev_present(h->busid)) {
+                h->restart_until = 1;         // unplugged while waiting: same as above
+                host_end_hold(h);
+                logm("[%s] device unplugged before %s connected it again. It will come back to this PC when plugged in.", h->busid, h->peer);
+            } else if (now >= h->reserve_until) {
+                host_end_hold(h);
+                logm("[%s] %s didn't connect it again: it works on this PC again.", h->busid, h->peer);
             }
             continue;
         }
@@ -675,7 +746,10 @@ static int cmd_host(void) {
         host_tick();
     }
     logm("Returning all devices to this PC...");
-    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) return_to_host(g_h[i].busid);
+    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0]) {
+        if (g_h[i].exported) return_to_host(g_h[i].busid);
+        else if (host_held(&g_h[i])) host_end_hold(&g_h[i]);
+    }
     close(ls);
     return 0;
 }

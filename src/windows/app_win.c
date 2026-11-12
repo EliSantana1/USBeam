@@ -292,6 +292,26 @@ static DWORD WINAPI monitor_main(LPVOID arg) {
         for (int i = 0; i < MAX_DEVS; i++) {
             Dev *d = &g_devs[i];
             if (!d->used || d->in_use || d->busy || d->is_system) continue;
+            if (d->restart_until) {          // restarted itself while another PC set it up (conn_main)
+                if (d->present) {
+                    d->restart_until = 0; d->reserve_until = now + RESTART_KEEP;
+                    say("[%s] %ls is back after restarting: waiting for %s to connect it again", d->busid, d->name, d->peer);
+                } else if (now >= d->restart_until) {
+                    d->restart_until = 0; d->returning = 1; d->blocked = 1;   // didn't come back: it was unplugged after all
+                    say("[%s] %ls was unplugged while %s was using it. It will come back to this PC when plugged in.", d->busid, d->name, d->peer);
+                }
+                continue;
+            }
+            if (d->reserve_until) {
+                if (!d->present) {
+                    d->reserve_until = 0; d->returning = 1; d->blocked = 1;
+                    say("[%s] %ls was unplugged before %s connected it again. It will come back to this PC when plugged in.", d->busid, d->name, d->peer);
+                } else if (now >= d->reserve_until) {
+                    say("[%s] %s didn't connect %ls again: returning it to this PC", d->busid, d->peer, d->name);
+                    end_hold(d);
+                }
+                continue;
+            }
             if (d->present && d->on_winusb) {
                 InterlockedExchange(&d->busy, 1);
                 if (d->returning) say("[%s] %ls was plugged back in. Returning it to this PC...", d->busid, d->name);
@@ -322,7 +342,7 @@ static DWORD WINAPI monitor_main(LPVOID arg) {
 static const char *local_state(Dev *d, int *countdown) {
     *countdown = 0;
     if (d->busy) return "switching";
-    if (d->in_use) return "in_use";
+    if (d->in_use || DEV_HELD(d)) return "in_use";     // held: restarting for the PC using it
     if (!d->wanted) return "hidden";
     if (d->drive_busy_until && GetTickCount64() < d->drive_busy_until) return "drive_busy";
     if (d->hold_until) {
@@ -366,7 +386,7 @@ static void handle_info(SOCKET s) {
         sb_add(&j, ",\"name\":", 8); sb_jstr(&j, name);
         int input = d->have_desc && devp_is_input((const unsigned char (*)[3])d->iface_class, d->num_ifaces);
         sb_printf(&j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"input\":%s,\"peer\":", d->vid, d->pid, st, cd, input ? "true" : "false");
-        sb_jstr(&j, d->in_use ? d->peer : "");
+        sb_jstr(&j, (d->in_use || DEV_HELD(d)) ? d->peer : "");
         sb_add(&j, ",\"taken_from\":", 14); sb_jstr(&j, d->taken_from);
         sb_add(&j, "}", 1);
     }
@@ -731,9 +751,10 @@ static void add_local_json(sb_t *j) {
         Dev *d = &g_devs[i];
         if (!d->used || !d->present || !d->removable || d->is_system) continue;
         int cd; const char *st = local_state(d, &cd);
-        int sys = !d->in_use && !d->share_forced && (d->is_radio || d->is_light);
+        int busy = d->in_use || DEV_HELD(d);
+        int sys = !busy && !d->share_forced && (d->is_radio || d->is_light);
         const char *note = d->is_net ? "network adapter, never shared" :
-                           ((d->is_storage || d->is_light) && !d->share_forced && !d->in_use) ?
+                           ((d->is_storage || d->is_light) && !d->share_forced && !busy) ?
                                (d->is_radio ? "Bluetooth/wireless adapter: shared only if you choose Share" :
                                 d->is_light ? "lighting controller: shared only if you choose Share" : "drive: shared only if you choose Share") : "";
         char name[512]; w2u(d->name, name, sizeof name);
@@ -743,7 +764,7 @@ static void add_local_json(sb_t *j) {
         sb_add(j, ",\"name\":", 8); sb_jstr(j, name);
         sb_printf(j, ",\"vid\":\"%04x\",\"pid\":\"%04x\",\"state\":\"%s\",\"countdown\":%d,\"fixed\":%s,\"peer\":",
                   d->vid, d->pid, st, cd, d->is_net ? "true" : "false");
-        char pl[160] = ""; if (d->in_use) peer_label(d->peer, pl, sizeof pl, 0);
+        char pl[160] = ""; if (busy) peer_label(d->peer, pl, sizeof pl, 0);
         sb_jstr(j, pl);
         sb_add(j, ",\"note\":", 8); sb_jstr(j, note);
         sb_printf(j, ",\"system\":%s}", sys ? "true" : "false");
@@ -852,7 +873,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     }
     else if (!strcmp(op, "local_cancel")) { if (d && d->hold_until) { d->hold_until = 0; d->blocked = 1; say("[%s] reconnect cancelled: %ls stays on this PC", d->busid, d->name); } }
     else if (!strcmp(op, "local_allow")) { if (d) { d->blocked = 0; d->hold_until = 0; } }
-    else if (!strcmp(op, "local_hide")) { if (d) { d->hidden = 1; d->share_forced = 0; save_config(); } }
+    else if (!strcmp(op, "local_hide")) { if (d) { d->hidden = 1; d->share_forced = 0; end_hold(d); save_config(); } }
     else if (!strcmp(op, "local_share")) {
         if (d) {
             if (d->is_net) { sb_printf(out, "%s", "{\"error\":\"Network adapters can't be shared: USBeam itself may depend on them.\"}"); return 400; }
@@ -862,7 +883,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     else if (!strcmp(op, "local_disconnect")) {
         // Back to this PC; still shared (only "Don't share" stops that). Held back only while the
         // session ends; the PC it came from is told, so its Auto-reconnect doesn't take it straight back.
-        if (d && d->in_use) {
+        if (d && (d->in_use || DEV_HELD(d))) {
             char pid[40]; id_of_ip(d->peer, pid, sizeof pid);
             d->blocked = 1; say("[%s] taking %ls back from %s", d->busid, d->name, d->peer);
             end_session(d);
@@ -910,7 +931,7 @@ static void svc_report(DWORD state) {
 // client_sleep in client.h). After waking: other PCs are looked for again at once.
 static void power_sleep(void) {
     int n = 0;
-    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use) { end_session(&g_devs[i]); n++; }
+    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && (g_devs[i].in_use || DEV_HELD(&g_devs[i]))) { end_session(&g_devs[i]); n++; }
     if (n) logm("Going to sleep: %d shared device(s) returned to this PC", n);
     if (have_usbip()) client_sleep();
 }
@@ -1034,7 +1055,7 @@ static int engine_run(void) {
     WaitForSingleObject(g_quit_event, INFINITE);
 
     logm("Stopping: returning devices to this PC and releasing remote devices...");
-    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && g_devs[i].in_use) end_session(&g_devs[i]);
+    for (int i = 0; i < MAX_DEVS; i++) if (g_devs[i].used && (g_devs[i].in_use || DEV_HELD(&g_devs[i]))) end_session(&g_devs[i]);
     if (have_usbip()) {
         client_release_all();
         usbip_stop_retries();

@@ -344,7 +344,10 @@ static int plat_networks(NetInfo *out, int max) {
 static void power_sleep(void) {
     int n = 0;
     host_lock();
-    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) { return_to_host(g_h[i].busid); g_h[i].exported = 0; n++; }
+    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && (g_h[i].exported || host_held(&g_h[i]))) {
+        if (host_held(&g_h[i])) host_end_hold(&g_h[i]); else return_to_host(g_h[i].busid);
+        g_h[i].exported = 0; n++;
+    }
     host_unlock();
     if (n) logm("Going to sleep: %d shared device(s) returned to this PC", n);
     client_sleep();
@@ -395,7 +398,7 @@ static void load_settings(void) {
 static void host_state(const char *busid, const char **state, const char **peer, int *countdown) {
     HostDev *h = hdev(busid, 0);
     *peer = ""; *countdown = 0;
-    if (h && h->exported) { *state = "in_use"; *peer = h->peer; }
+    if (h && (h->exported || host_held(h))) { *state = "in_use"; *peer = h->peer; }   // held: restarting for that PC
     else if (h && h->hold_until) { *state = "countdown"; *countdown = (int)(h->hold_until - time(NULL)); if (*countdown < 0) *countdown = 0; }
     else if (h && h->blocked) *state = "kept";
     else *state = "available";
@@ -461,11 +464,11 @@ static void handle_kick(int s, const char *peer, const uint8_t *op) {
         return;
     }
     HostDev *h = is_system_drive(busid) ? NULL : hdev(busid, 0);
-    if (!h || !h->exported) { put32b(r + 4, 1); send_all(s, r, 8); return; }
+    if (!h || !(h->exported || host_held(h))) { put32b(r + 4, 1); send_all(s, r, 8); return; }
     char name[256], pl[160], by[160];
     peer_label(h->peer, pl, sizeof pl, 0);
     peer_label(peer, by, sizeof by, 0);
-    return_to_host(busid);
+    if (host_held(h)) host_end_hold(h); else return_to_host(busid);
     h->exported = 0; h->blocked = 1; h->hold_until = time(NULL) + g_hold_secs; h->last_shown = 0;
     logm("[%s] %s released from %s at the request of %s. It works on this PC again; other PCs may take it again in %d s.",
          busid, dev_name(busid, name, sizeof name), pl, by, g_hold_secs);
@@ -763,7 +766,7 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
     }
     else if (!strcmp(op, "local_cancel")) { if (h && h->hold_until) { h->hold_until = 0; h->blocked = 1; logm("[%s] reconnect cancelled", id); } }
     else if (!strcmp(op, "local_allow")) { if (h) { h->blocked = 0; h->hold_until = 0; } }
-    else if (!strcmp(op, "local_hide")) { set_hidden(id, 1); set_shared(id, 0); save_settings(); }
+    else if (!strcmp(op, "local_hide")) { set_hidden(id, 1); set_shared(id, 0); if (host_held(h)) host_end_hold(h); save_settings(); }
     else if (!strcmp(op, "local_share")) {
         if (drive_mounted(id)) { sb_printf(out, "%s", "{\"error\":\"This drive is in use by this PC. Unmount (eject) it first.\"}"); return 400; }
         set_hidden(id, 0); if (system_reason(id)) set_shared(id, 1);
@@ -774,8 +777,9 @@ static int ui_api(const char *method, const char *path, const char *body, sb_t *
         // Back to this PC; still shared (only "Don't share" stops that). The PC it came from is told,
         // so its Auto-reconnect doesn't take it straight back.
         // (If that PC isn't known by its USBeam id, it's kept here instead, as before.)
-        if (h && h->exported) {
-            return_to_host(id); h->exported = 0;
+        if (h && (h->exported || host_held(h))) {
+            if (host_held(h)) host_end_hold(h); else return_to_host(id);
+            h->exported = 0;
             id_of_ip(h->peer, h->taken_from, sizeof h->taken_from);
             if (!h->taken_from[0]) h->blocked = 1;
             logm("[%s] taken back from %s%s", id, h->peer, h->blocked ? " (kept on this PC)" : "");
@@ -1003,7 +1007,10 @@ static int cmd_app(int service) {
     pthread_join(ht, NULL);
     pthread_join(dt, NULL);
     host_lock();
-    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0] && g_h[i].exported) return_to_host(g_h[i].busid);
+    for (int i = 0; i < MAXH; i++) if (g_h[i].busid[0]) {
+        if (g_h[i].exported) return_to_host(g_h[i].busid);
+        else if (host_held(&g_h[i])) host_end_hold(&g_h[i]);
+    }
     host_unlock();
     pthread_join(ct, NULL);
     if (!uitest) pthread_join(swt, NULL);

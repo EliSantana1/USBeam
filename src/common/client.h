@@ -71,9 +71,12 @@ typedef struct {
     unsigned long long attached_at;   // when it was connected here (for Auto-release)
     unsigned long long ended_at;      // when its connection ended (0 = hasn't)
     unsigned long long give_until;    // given to this PC by its own PC (Give To): connect by then, or drop it
+    unsigned long long restart_until; // it restarted itself while being set up here: keep reconnecting until then
+    int restarts;                     // such restarts in a row (a device that keeps doing it is given up on)
     char name[128], vid[8], pid[8];  // last seen details (shown if the PC drops off for a while)
 } Use;
 
+#define RESTART_TRIES 3   // reconnects in a row for a device that restarted itself right after connecting
 static Remote g_r[CL_MAXR];
 static Use g_use[CL_MAXW];
 static int g_netpref = NET_AUTO;
@@ -492,12 +495,33 @@ static void client_tick(void) {
         }
         if (u.port >= 0) {
             if (plat_port_alive(u.port, u.ip, u.busid)) continue;
-            logm("[%s] connection ended", u.busid);
             plat_stop_retries();                 // only USBeam decides about reconnecting (Auto-reconnect)
+            // Ended right after connecting: most likely the device restarted itself while this PC set
+            // it up (a Bluetooth chip reloading its firmware, for example). Its own PC keeps it for this
+            // PC meanwhile, so connect it again, a few times at most. If its PC let it go instead
+            // (Take back, unplugged), it isn't offered to this PC and the retries simply stop.
+            int restarted = u.attached_at && now - u.attached_at <= 12000 && u.restarts < RESTART_TRIES;
+            logm(restarted ? "[%s] connection ended right after connecting (the device restarted?): connecting it again" : "[%s] connection ended", u.busid);
             cl_lock();
             g_use[i].port = -1; g_use[i].ended_at = now;
-            if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
+            if (restarted) {
+                g_use[i].want = 1; g_use[i].restarts++;
+                g_use[i].restart_until = now + 20000; g_use[i].next_try = now + 1500;
+            } else {
+                g_use[i].restarts = 0; g_use[i].restart_until = 0;
+                if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
+            }
             cl_unlock();
+            continue;
+        }
+        if (u.restart_until && now > u.restart_until) {   // it didn't come back for this PC
+            cl_lock();
+            if (g_use[i].used && g_use[i].port < 0 && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
+                g_use[i].restart_until = 0; g_use[i].restarts = 0;
+                if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
+            }
+            cl_unlock();
+            logm("[%s] didn't come back after restarting", u.busid);
             continue;
         }
         if (u.give_until && now > u.give_until) {   // given by its PC, but it never became available here
@@ -516,8 +540,11 @@ static void client_tick(void) {
         cl_lock();
         Remote *r = rm_find(u.pc);
         if (r && r->via >= 0) snprintf(ip, sizeof ip, "%s", r->addr[r->via].ip);
-        int listed = 0, kept = 0;
+        int listed = 0, kept = 0, moved_on = 0;
         if (r && r->via >= 0) for (int k = 0; k < r->ndev; k++) if (!strcmp(r->dev[k].busid, u.busid)) {
+            // While it restarts its PC shows it in use (kept for this PC), or not at all while it's
+            // off the bus. Anything else: its PC stopped keeping it (released, unplugged, countdown).
+            if (strcmp(r->dev[k].state, "in_use")) moved_on = 1;
             if (!strcmp(r->dev[k].state, "available")) listed = 1;
             else if (!strcmp(r->dev[k].state, "kept")) kept = 1;
             // Its own PC took it back from this PC ("Take back" there) a moment ago: don't grab it
@@ -533,6 +560,13 @@ static void client_tick(void) {
             changed = 1;
             continue;
         }
+        if (u.restart_until && moved_on && g_use[i].used && g_use[i].port < 0 && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
+            g_use[i].restart_until = 0; g_use[i].restarts = 0;
+            if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }
+            cl_unlock();
+            logm("[%s] its PC isn't keeping it for this PC: stopped reconnecting", u.busid);
+            continue;
+        }
         int locked_out = r && r->paired_only && !pair_is_paired(u.pc);
         cl_unlock();
         if (locked_out && ip[0] && listed) {      // that PC lets only paired PCs use its devices
@@ -545,16 +579,18 @@ static void client_tick(void) {
             cl_unlock();
             continue;
         }
-        if (!ip[0] || !listed) { cl_lock(); g_use[i].next_try = now + 2000; cl_unlock(); continue; }
+        // While it restarts, its PC lists it as in use (kept for this PC): connect it all the same.
+        if (!ip[0] || (!listed && !u.restart_until)) { cl_lock(); g_use[i].next_try = now + 2000; cl_unlock(); continue; }
         if (g_cl_asleep) break;
         pair_before_attach(u.pc, ip, u.busid);    // a paired PC: let it know it's really this PC asking
         int port = plat_attach(ip, u.busid);
         cl_lock();
         if (g_use[i].used && !strcmp(g_use[i].busid, u.busid) && !strcmp(g_use[i].pc, u.pc)) {
             g_use[i].port = port;
-            if (port >= 0) { g_use[i].attached_at = now; g_use[i].give_until = 0; }
+            if (port >= 0) { g_use[i].attached_at = now; g_use[i].give_until = 0; g_use[i].restart_until = 0; }
             snprintf(g_use[i].ip, sizeof g_use[i].ip, "%s", ip);
-            if (port < 0) {
+            if (port < 0 && g_use[i].restart_until) g_use[i].next_try = now + 1500;   // not back yet: try again shortly
+            else if (port < 0) {
                 if (!g_use[i].autorc || !fail_get(u.pc, u.busid, now)) fail_set(u.pc, u.busid, plat_attach_error(), now);
                 g_use[i].next_try = now + 3000;
                 if (!g_use[i].autorc) { g_use[i].used = 0; changed = 1; }    // a one-off Use that failed
@@ -776,7 +812,7 @@ static void client_json(sb_t *j) {
             Use *u = use_find(r->id, d->busid);
             const char *st = d->state;
             if (u && u->port >= 0) st = "mine";
-            else if (u && u->want && !u->release && !strcmp(d->state, "available")) st = "connecting";
+            else if (u && u->want && !u->release && (!strcmp(d->state, "available") || u->restart_until)) st = "connecting";
             else if (u && u->want && u->autorc && strcmp(d->state, "in_use")) st = !strcmp(d->state, "countdown") ? "countdown" : "waiting";
             else if (!strcmp(d->state, "in_use")) st = "busy";
             if (!f2) sb_add(j, ",", 1);
@@ -805,7 +841,7 @@ static void client_json(sb_t *j) {
             sb_add(j, ",\"vid\":", 7); sb_jstr(j, u->vid);
             sb_add(j, ",\"pid\":", 7); sb_jstr(j, u->pid);
             sb_printf(j, ",\"state\":\"%s\",\"countdown\":0,\"auto\":%s,\"peer\":\"\"}",
-                      u->port >= 0 ? "mine" : "waiting", u->autorc ? "true" : "false");
+                      u->port >= 0 ? "mine" : u->restart_until ? "connecting" : "waiting", u->autorc ? "true" : "false");
         }
         sb_add(j, "]}", 2);
     }
