@@ -137,6 +137,24 @@ wait_for returned_again 10
 check returned_again "an unplug after all: back to its own side, as always"
 check 'wait_for here 10' "and works there"
 
+echo "== 5. let go of normally, six times: back to its own side every time"
+# usbip-host resets the device when the other side lets go; during a reset Linux shows its USB
+# address as 0 for a moment. That must never be taken for an unplug.
+sleep 12      # (the countdown from step 4)
+unplugs() { grep -c "unplugged while" "$LOG/host"; }
+released() { grep -c "released by 10.78.0.1" "$LOG/host"; }
+u0=$(unplugs)
+for n in $(seq 1 6); do
+    r0=$(released)
+    use
+    sleep 2
+    stop_use
+    wait_for '[ "$(released)" -gt "$r0" ]' 10 || fail "round $n: the let-go wasn't noticed"
+    wait_for here 10 || fail "round $n: it didn't work on its own side again"
+done
+check '[ "$(unplugs)" = "$u0" ]' "a normal let-go is never taken for an unplug"
+check '! tr " " "\n" < /sys/bus/usb/drivers/usbip-host/match_busid | grep -qx "$BUSID"' "and it's off usbip-host's list"
+
 echo "--- what USBeam said"
 cat "$LOG/host" | grep -v -E "listed devices" | tail -40
 cleanup

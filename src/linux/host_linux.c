@@ -39,7 +39,8 @@ typedef struct {
     int last_shown;
     char taken_from[40]; // USBeam id of the PC this PC took it back from ("Take back"), until it's used again
     time_t exported_at;  // when it was handed to the client
-    unsigned exp_devnum, exp_vid, exp_pid;   // its USB address and ids then (a new address: it left the bus meanwhile)
+    unsigned long long exp_ident;            // which device it was then (dev_ident: another one: it left the bus meanwhile)
+    unsigned exp_vid, exp_pid;               // and its ids
     time_t restart_until;  // restarted itself while the client set it up: waiting for it to come back (host_tick)
     time_t reserve_until;  // came back after restarting: kept for that client (h->peer) until then
     int claim;             // open file + 1 holding its port while it restarts (claim_port), 0 = none
@@ -99,6 +100,14 @@ static int dev_present(const char *busid) {
     snprintf(p, sizeof p, USBDEV "/%s/idVendor", busid);
     return stat(p, &st) == 0;
 }
+// Which device is on this port: Linux makes a new device (a new folder in /sys) each time one
+// arrives, and keeps it through USB resets. 0 = none. (Not its USB address: that reads 0 for a
+// moment during every reset, and an address can be given out again.)
+static unsigned long long dev_ident(const char *busid) {
+    char p[PATH_MAX]; struct stat st;
+    snprintf(p, sizeof p, USBDEV "/%s", busid);
+    return stat(p, &st) == 0 ? (unsigned long long)st.st_ino : 0;
+}
 
 static int has_net_child(const char *busid) {
     char pat[PATH_MAX]; glob_t g;
@@ -123,12 +132,11 @@ static int on_vhci(const char *busid) {
 }
 
 // ---------------------------------------------------------------- system drives: never shown, never touched
-// See sysdrv_check in sysdrive.h. "busid devnum" identifies the same physical connection.
+// See sysdrv_check in sysdrive.h. "busid ident" identifies the same physical connection.
 static int sysdrive_check(const char *busid, int fresh) {
     if (!busid || !busid[0] || !strncmp(busid, "usb", 3) || strchr(busid, ':')) return 0;
-    char key[48], dn[16] = "";
-    read_attr(busid, "devnum", dn, sizeof dn);
-    snprintf(key, sizeof key, "%s %s", busid, dn);
+    char key[64];
+    snprintf(key, sizeof key, "%s %llu", busid, dev_ident(busid));
     return sysdrv_check(key, busid, fresh, sysdrv_usb_state);
 }
 static int is_system_drive(const char *busid) { return sysdrive_check(busid, 0); }        // for listing
@@ -235,12 +243,12 @@ static int is_realtek_bt(const char *busid) {
     return 0;
 }
 // It dropped off and came back (as a new device): 1. Waits up to ms for it.
-static int wait_reenumerated(const char *busid, unsigned devnum, int ms) {
+static int wait_reenumerated(const char *busid, unsigned long long ident, int ms) {
     unsigned long long start = mono_ms();
     int left = 0;
     while (mono_ms() - start < (unsigned long long)ms) {
         if (!dev_present(busid)) left = 1;
-        else if (attr_dec(busid, "devnum") != devnum) {          // back, as a new device
+        else if (dev_ident(busid) != ident) {                     // back, as a new device
             char p[PATH_MAX]; struct stat st;
             snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
             for (int i = 0; i < 50 && lstat(p, &st) != 0; i++) usleep(20000);   // until Linux has set it up
@@ -287,10 +295,10 @@ static int rtk_drop_via_usb(const char *busid) {
 // Before it goes to another PC. Its port is claimed meanwhile, so it comes back unused here.
 static void rtk_clean_before_export(const char *busid) {
     if (!is_realtek_bt(busid)) return;
-    unsigned devnum = attr_dec(busid, "devnum");
+    unsigned long long ident = dev_ident(busid);
     int fd = claim_port(busid);
     if (fd < 0) return;
-    if (rtk_drop_via_hci(busid) == 0 && wait_reenumerated(busid, devnum, 4000)) logm("[%s] cleared its firmware before handing it over (starts faster there)", busid);
+    if (rtk_drop_via_hci(busid) == 0 && wait_reenumerated(busid, ident, 4000)) logm("[%s] cleared its firmware before handing it over (starts faster there)", busid);
     close(fd);                                       // (closing the file ends the port claim)
 }
 // Back from another PC, still without a driver here: it restarts clean and its driver here loads it at once.
@@ -299,8 +307,8 @@ static int rtk_clean_on_return(const char *busid) {
     char p[PATH_MAX]; struct stat st;
     snprintf(p, sizeof p, USBDEV "/%s/driver", busid);
     if (lstat(p, &st) == 0) return 0;               // a driver here has it already: leave it alone
-    unsigned devnum = attr_dec(busid, "devnum");
-    if (rtk_drop_via_usb(busid) == 0 && wait_reenumerated(busid, devnum, 4000)) { logm("[%s] cleared the other PC's firmware: it starts at once here", busid); return 1; }
+    unsigned long long ident = dev_ident(busid);
+    if (rtk_drop_via_usb(busid) == 0 && wait_reenumerated(busid, ident, 4000)) { logm("[%s] cleared the other PC's firmware: it starts at once here", busid); return 1; }
     return 0;
 }
 
@@ -334,10 +342,10 @@ static int stub_bind(const char *busid) {
         // back): wait until it has stayed the same device, with a driver, for 2 seconds (at most 20).
         char dp[PATH_MAX]; struct stat dst;
         snprintf(dp, sizeof dp, USBDEV "/%s/driver", busid);
-        unsigned long long t0 = mono_ms(), since = 0; unsigned dn = 0;
+        unsigned long long t0 = mono_ms(), since = 0, dn = 0;
         while (mono_ms() - t0 < 20000) {
             int up = dev_present(busid) && lstat(dp, &dst) == 0;
-            unsigned d = up ? attr_dec(busid, "devnum") : 0;
+            unsigned long long d = up ? dev_ident(busid) : 0;
             if (!up || d != dn) { dn = d; since = mono_ms(); }
             else if (mono_ms() - since >= 2000) break;
             usleep(100000);
@@ -398,14 +406,14 @@ static void release_claim(HostDev *h) {             // closing the file releases
 
 // The moment a device just handed over drops off the bus, claim its port, before it can come
 // back (that takes a USB reset and debounce, well over 100 ms). Watches for RESTART_SETUP s.
-typedef struct { HostDev *h; int gen; unsigned devnum; char busid[32]; } Watch;
+typedef struct { HostDev *h; int gen; unsigned long long ident; char busid[32]; } Watch;
 static void *restart_watch(void *arg) {
     Watch w = *(Watch *)arg;
     free(arg);
     for (int i = 0; i < RESTART_SETUP * 50; i++) {
         usleep(20000);
         if (__atomic_load_n(&w.h->watch_gen, __ATOMIC_SEQ_CST) != w.gen) break;   // handed over again since
-        if (dev_present(w.busid) && attr_dec(w.busid, "devnum") == w.devnum) continue;
+        if (dev_ident(w.busid) == w.ident) continue;            // still the same device (resets included)
         if (!__atomic_load_n(&w.h->exported, __ATOMIC_SEQ_CST) && !__atomic_load_n(&w.h->restart_until, __ATOMIC_SEQ_CST)) break;   // released normally
         int fd = claim_port(w.busid);
         if (fd < 0) continue;                     // (usbip-host may not have let go of the port yet)
@@ -418,7 +426,7 @@ static void *restart_watch(void *arg) {
 static void restart_watch_start(HostDev *h) {
     Watch *w = malloc(sizeof *w);
     if (!w) return;
-    w->h = h; w->gen = __atomic_add_fetch(&h->watch_gen, 1, __ATOMIC_SEQ_CST); w->devnum = h->exp_devnum;
+    w->h = h; w->gen = __atomic_add_fetch(&h->watch_gen, 1, __ATOMIC_SEQ_CST); w->ident = h->exp_ident;
     snprintf(w->busid, sizeof w->busid, "%s", h->busid);
     pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&t, &at, restart_watch, w)) free(w);
@@ -793,7 +801,7 @@ static void handle_import(int s, const char *peer) {
     h->exported = 1; h->returning = 0; h->taken_from[0] = 0;
     h->restart_until = 0; h->reserve_until = 0;
     h->exported_at = time(NULL);
-    h->exp_devnum = attr_dec(busid, "devnum");
+    h->exp_ident = dev_ident(busid);
     h->exp_vid = attr_hex(busid, "idVendor"); h->exp_pid = attr_hex(busid, "idProduct");
     snprintf(h->peer, sizeof h->peer, "%s", peer);
     release_claim(h);
@@ -813,8 +821,9 @@ static void host_tick(void) {
             if (dev_present(h->busid) && !bound_to_stub(h->busid)) return_to_host(h->busid);
         }
         if (h->exported) {
-            // Gone, or back already as a new connection (a new USB address): it left the bus.
-            if (!dev_present(h->busid) || attr_dec(h->busid, "devnum") != h->exp_devnum) {
+            // Gone, or back already as a new device: it left the bus. (A USB reset, which usbip-host
+            // does when the other PC lets go, keeps the same device.)
+            if (dev_ident(h->busid) != h->exp_ident) {
                 if (now - h->exported_at <= RESTART_SETUP) {
                     // Most likely it restarted itself while that PC set it up. usbip-host keeps its
                     // claim on this port (match_busid), so when it's back it goes straight to
@@ -880,7 +889,7 @@ static void host_tick(void) {
         }
         if (h->returning && dev_present(h->busid)) {
             h->returning = 0;
-            if (bound_to_stub(h->busid)) return_to_host(h->busid);
+            return_to_host(h->busid);            // off usbip-host's list, and its own drivers take it
             h->hold_until = now + g_hold_secs; h->last_shown = 0;
             logm("[%s] %s plugged back in and works on this PC. Other PCs may take it again in %d s.",
                  h->busid, dev_name(h->busid, name, sizeof name), g_hold_secs);
