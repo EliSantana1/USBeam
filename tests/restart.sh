@@ -13,6 +13,8 @@
 #   4. right after being handed over, but gone for longer than a restart takes: an unplug, as always
 #   5. let go of normally (usbip-host resets it then), six times: never taken for an unplug, back
 #      on its own side each time, and off usbip-host's list
+#   6. left without its own driver (or held by usbip-host) while USBeam runs, and before it starts:
+#      given back to its own drivers
 set -u
 cd "$(dirname "$0")/.." || exit 1
 OUT=$(mktemp)
@@ -172,6 +174,40 @@ for n in $(seq 1 6); do
 done
 check no_new_unplug "a normal let-go is never taken for an unplug"
 check '! tr " " "\n" < /sys/bus/usb/drivers/usbip-host/match_busid | grep -qx "$BUSID"' "and it's off usbip-host's list"
+
+echo "== 6. left without its own driver (by an older version, or anything else): given back"
+strays() { grep -c "given back to its own drivers" "$LOG/host"; }
+s0=$(strays)
+stray_logged() { [ "$(strays)" -gt "$s0" ]; }
+echo "$BUSID" > "/sys/bus/usb/devices/$BUSID/driver/unbind"
+check '[ -z "$(driver)" ]' "(the test took its driver away)"
+wait_for here 15
+check here "while USBeam runs: it works on its own side again within seconds"
+check stray_logged "and USBeam says so"
+# Held by usbip-host when USBeam starts (it stopped abruptly while another PC used the device):
+# given back as USBeam starts.
+use
+ip netns pids usbeamrs 2>/dev/null | xargs -r kill -KILL 2>/dev/null
+pkill -P "$HOSTJOB" 2>/dev/null; kill "$HOSTJOB" 2>/dev/null
+stop_use
+check '[ "$(driver)" = usbip-host ]' "(USBeam stopped abruptly while the device was in use: usbip-host still has it)"
+(tail -f /dev/null | ip netns exec usbeamrs build/usbeam host >>"$LOG/host" 2>&1) &
+HOSTJOB=$!
+wait_for here 10
+check here "as USBeam starts again: it works on its own side at once"
+check '[ "$(driver)" = usb ]' "with its own driver"
+check 'in_log "was left shared: returning it to this PC"' "and USBeam says so"
+# Without a driver when USBeam starts (how an older version left a Bluetooth adapter): given back at once.
+ip netns pids usbeamrs 2>/dev/null | xargs -r kill 2>/dev/null; pkill -P "$HOSTJOB" 2>/dev/null; kill "$HOSTJOB" 2>/dev/null; sleep 2
+echo "$BUSID" > "/sys/bus/usb/devices/$BUSID/driver/unbind"
+check '[ -z "$(driver)" ]' "(no driver before USBeam starts)"
+s1=$(strays)
+stray_logged_again() { [ "$(strays)" -gt "$s1" ]; }
+(tail -f /dev/null | ip netns exec usbeamrs build/usbeam host >>"$LOG/host" 2>&1) &
+HOSTJOB=$!
+wait_for here 10
+check here "as USBeam starts: it works on its own side at once"
+check stray_logged_again "and USBeam says so"
 
 echo "--- what USBeam said"
 cat "$LOG/host" | grep -v -E "listed devices" | tail -40

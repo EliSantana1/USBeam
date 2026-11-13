@@ -48,6 +48,7 @@ typedef struct {
     char btaddr[18];       // Bluetooth adapter: its address, as last seen here (btkeys.h)
     char bt_peer[40];      // the PC (USBeam id) its Bluetooth pairings went to, until they come back
     time_t bt_wait_until;  // let go by that PC: held back here until its pairings are back (or then)
+    time_t stray_since;    // seen without its own driver while nothing was going on with it (repair_strays)
 } HostDev;
 #define BT_WAIT 8          // s a Bluetooth adapter is held back for its pairings to come back (btkeys.h)
 
@@ -819,6 +820,39 @@ static void handle_import(int s, const char *peer) {
 }
 
 // ---------------------------------------------------------------- periodic checks
+// Safety net. A device USBeam isn't doing anything with must work on this PC: its own driver, not
+// usbip-host and not none. One left otherwise (by an older version, a crash, or anything else) is
+// given back to its own drivers, at once when USBeam starts, else after 5 s of being seen that way
+// (so nothing in the middle of a hand-over is touched). Checked every 2 s.
+static void repair_strays(time_t now) {
+    static int started;
+    static time_t next;
+    if (started && now < next) return;
+    next = now + 2;
+    char ids[MAXH][32], drv[PATH_MAX], p[PATH_MAX], cfg[16];
+    int n = list_shareable(ids, MAXH);
+    for (int i = 0; i < n; i++) {
+        HostDev *h = hdev(ids[i], 1);
+        if (!h) continue;
+        // Busy: handed over, held for a PC, waiting for Bluetooth pairings, unplugged, port claimed.
+        if (h->exported || host_held(h) || h->bt_wait_until || h->returning || h->claim) { h->stray_since = 0; continue; }
+        snprintf(p, sizeof p, USBDEV "/%s/driver", ids[i]);
+        ssize_t dl = readlink(p, drv, sizeof drv - 1);
+        const char *d = "";
+        if (dl > 0) { drv[dl] = 0; d = strrchr(drv, '/') ? strrchr(drv, '/') + 1 : drv; }
+        read_attr(ids[i], "bConfigurationValue", cfg, sizeof cfg);
+        const char *why = dl <= 0 ? "had no driver" : !strcmp(d, "usbip-host") ? "was still held by usbip-host" :
+                          (!strcmp(d, "usb") && !cfg[0]) ? "was left unconfigured" : NULL;
+        if (!why) { h->stray_since = 0; continue; }
+        if (started && (!h->stray_since || now - h->stray_since < 5)) { if (!h->stray_since) h->stray_since = now; continue; }
+        h->stray_since = 0;
+        char name[256];
+        logm("[%s] %s %s: given back to its own drivers", ids[i], dev_name(ids[i], name, sizeof name), why);
+        return_to_host(ids[i]);
+    }
+    started = 1;
+}
+
 static void host_tick(void) {
     time_t now = time(NULL);
     char name[256];
@@ -909,6 +943,7 @@ static void host_tick(void) {
             else if (left != h->last_shown && (left <= 5 || left % 5 == 0)) { h->last_shown = left; logm("[%s] available to clients in %d s (C %s to cancel)", h->busid, left, h->busid); }
         }
     }
+    repair_strays(now);
 }
 
 static void host_print_list(void) {

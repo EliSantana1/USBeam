@@ -571,7 +571,11 @@ static void bt_server(plat_sock s, const char *peer, const uint8_t *op) {
         int ok = bt_get_ok(peer, busid, &h, addr);
         if (ok) { snprintf(h->bt_peer, sizeof h->bt_peer, "%s", id); g_bt_hostdirty = 1; }   // by its USBeam id (its address may change)
         host_unlock();
-        if (!ok) { st = 3; pr_reply(s, OP_REP_BT, &st, 1); crypto_wipe(k, sizeof k); return; }
+        if (!ok) {
+            st = 3; pr_reply(s, OP_REP_BT, &st, 1); crypto_wipe(k, sizeof k);
+            logm("[%s] %s asked for its Bluetooth pairings, but the adapter isn't working on this PC right now: they stay here", busid, peer);
+            return;
+        }
         sb_t plain = {0}, sealed = {0};
         bt_snapshot_now(addr);                   // what is connected through it now, so it follows it
         bt_pack(addr, &plain);
@@ -740,7 +744,8 @@ static void plat_bt_before(const char *pc, const char *ip, const char *busid, in
         if (b) b->state = BTS_NONE;
         pthread_mutex_unlock(&g_bt_mx);
         if (st == 1) logm("[%s] Bluetooth pairings stay on its PC: pair the two PCs to bring them along", busid);
-        else if (st != 3) logm("[%s] its Bluetooth pairings couldn't be brought along this time", busid);
+        else if (st == 3) logm("[%s] its Bluetooth pairings stay on its PC this time: the adapter wasn't working there", busid);
+        else logm("[%s] its Bluetooth pairings couldn't be brought along this time (%d)", busid, st);
         return;
     }
     char a[18] = "";
