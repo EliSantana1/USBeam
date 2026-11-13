@@ -21,6 +21,7 @@ Add an entry for every bug fixed from now on.
 | 12 | Every Windows update left its ~48 MB installer in the temporary folder; a cancelled Linux update left the AppImage in the cache | the installer can't remove itself | `windows-upgrade.ps1` step 4, `linux-upgrade.sh` |
 | 13 | Uninstalling on a PC that uses usbip-win2 itself would remove the driver when run silently | a silent uninstall answers "Yes" | `windows-upgrade.ps1 -KeepDriver` (on the Surface) |
 | 14 | Kernel tests left their time limit and test host running after they ended | background jobs not stopped | `restart.sh`, `mousefeel.sh` end cleanly (the run doesn't hang) |
+| 15 | The leftover-installer cleanup (0.3.26) removed any USBeam installer, also a newer one just about to run (the 0.3.26 to 0.3.27 update test failed) | it didn't look at the version | `windows-upgrade.ps1` step 4 (a newer installer is left alone, the finished one removed); updates are tested from the latest release |
 
 ## Before every release
 

@@ -31,6 +31,7 @@
 #include <functional>
 #include <vector>
 #include "WebView2.h"
+#include "../../common/version.h"
 
 #define UI_PORT 3242
 #define WM_TRAY (WM_APP + 1)
@@ -256,9 +257,31 @@ static std::wstring sha256_file(const std::wstring &path) {
 struct UpdateJob { std::wstring url, sha, ver; };
 static volatile LONG g_updating;   // an update is being downloaded or installed (its file is in use)
 
+// "USBeam-Setup-<version>.exe" for this version or an older one: 1. A newer one (an update about to
+// be installed) or any other name: 0.
+static int finished_setup(const wchar_t *name) {
+    size_t n = wcslen(name);
+    if (n < 18 || _wcsnicmp(name, L"USBeam-Setup-", 13) != 0 || _wcsicmp(name + n - 4, L".exe") != 0) return 0;
+    const wchar_t *v = name + 13, *p = name + n - 4;    // the version: from after "USBeam-Setup-" to ".exe"
+    for (const wchar_t *c = v; c < p; c++) if (!iswdigit(*c) && *c != L'.') return 0;
+    if (!iswdigit(*v) || !iswdigit(p[-1])) return 0;
+    const char *m = USBEAM_VERSION;
+    for (int i = 0; i < 8 && (v < p || *m); i++) {      // compare the numbers one by one (v ends at p)
+        long a = 0, b = 0;
+        while (v < p && iswdigit(*v) && a < 100000) a = a * 10 + (*v++ - L'0');
+        while (*m >= '0' && *m <= '9') b = b * 10 + (*m++ - '0');
+        if (a != b) return a < b;
+        if (v < p && *v == L'.') v++;
+        if (*m == '.') m++;
+        if (v < p && !iswdigit(*v)) return 0;            // "1..2": not a version
+    }
+    return v >= p && !*m;                               // the same version (anything longer: no)
+}
+
 // Installers an update downloaded to the temporary folder. The installer removes older ones, but not
 // itself: it's still running while it starts this app again. So this app removes them once they're
-// done: at start, then every 30 s for 5 minutes (until none are left). Only USBeam-Setup-*.exe files.
+// done: at start, then every 30 s for 5 minutes (until none are left). Only USBeam-Setup-<version>.exe
+// files for this version or an older one: a newer one may be just about to run.
 static DWORD WINAPI cleanup_downloads(LPVOID) {
     wchar_t tmp[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, tmp)) return 0;
@@ -270,7 +293,7 @@ static DWORD WINAPI cleanup_downloads(LPVOID) {
         HANDLE h = FindFirstFileW((std::wstring(tmp) + L"USBeam-Setup-*.exe").c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) return 0;
         do {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !finished_setup(fd.cFileName)) continue;
             if (!DeleteFileW((std::wstring(tmp) + fd.cFileName).c_str())) left++;     // still running
         } while (FindNextFileW(h, &fd));
         FindClose(h);

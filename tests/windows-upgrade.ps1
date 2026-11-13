@@ -70,6 +70,12 @@ Show
 Say "2. Update to $NewVersion the way the app does (installer started with the same options)"
 # The app saves the download in the temporary folder as USBeam-Setup-<version>.exe and runs it.
 $dl = Join-Path $env:TEMP "USBeam-Setup-$NewVersion.exe"
+# The app removes finished installers from there (at start, then every 30 s for 5 minutes); the app
+# does this while it isn't downloading one itself. Here the download is copied in from outside, so it
+# is copied between two of those moments, as the app itself would be busy with it then.
+# (0.3.26 removed any USBeam installer; newer versions leave newer ones alone.)
+$app0 = Get-Process USBeam -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($app0) { for ($i = 0; $i -lt 40; $i++) { $age = ((Get-Date) - $app0.StartTime).TotalSeconds; if ($age -ge 3 -and ($age % 30) -ge 3 -and ($age % 30) -lt 20) { break }; Start-Sleep 1 } }
 Copy-Item $New $dl -Force
 Copy-Item $Old (Join-Path $env:TEMP 'USBeam-Setup-0.0.1.exe') -Force     # an older download, to be cleaned up
 RunSetup $dl '/SILENT /SUPPRESSMSGBOXES /NORESTART' 'update.log'
@@ -86,9 +92,14 @@ Say "4. Start the app four more times (three at once): still one copy"
 $app = Join-Path (AppDir) 'USBeam.exe'
 1..3 | ForEach-Object { Start-Process $app }
 Start-Sleep 2; Start-Process $app -ArgumentList '--tray'
+# An installer for a newer version than this one (as if an update were about to run): left alone.
+$newer = Join-Path $env:TEMP 'USBeam-Setup-99.0.0.exe'
+Copy-Item $New $newer -Force
 CheckClean
 # The installer can't remove itself (it starts the app while still running): the app removes it.
 WaitFor 'the downloaded installer was left in the temporary folder' 90 { -not (Test-Path $dl) } | Out-Null
+if (-not (Test-Path $newer)) { Fail 'an installer for a newer version was removed (it may be about to run)' }
+Remove-Item $newer -Force -ErrorAction SilentlyContinue
 
 Say "5. Uninstall"
 $dir = AppDir

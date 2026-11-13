@@ -438,12 +438,18 @@ int main(int argc, char **argv) {
     server.setSocketOptions(QLocalServer::UserAccessOption);
     server.listen(sockName);
     // Downloaded updates left in this user's cache folder (setup.sh moves the one it installs; one
-    // whose install was cancelled stays): not needed any more. Never the file this copy runs from.
+    // whose install was cancelled stays): not needed any more. Only "USBeam-<version>.AppImage" for
+    // this version or an older one (a newer one may be about to be installed), never the file this
+    // copy runs from.
     {
         const QString own = QFileInfo(qEnvironmentVariable("APPIMAGE")).canonicalFilePath();
+        const QRegularExpression re("^USBeam-([0-9]+(\\.[0-9]+)*)\\.AppImage$");
         QDir cache(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
-        for (const QFileInfo &fi : cache.entryInfoList({ "USBeam-*.AppImage" }, QDir::Files))
-            if (fi.canonicalFilePath() != own) QFile::remove(fi.absoluteFilePath());
+        for (const QFileInfo &fi : cache.entryInfoList({ "USBeam-*.AppImage" }, QDir::Files)) {
+            const QRegularExpressionMatch m = re.match(fi.fileName());
+            if (m.hasMatch() && !newerVersion(m.captured(1), USBEAM_VERSION) && fi.canonicalFilePath() != own)
+                QFile::remove(fi.absoluteFilePath());
+        }
     }
     // Before starting another copy of USBeam (update, restart): let it take over at once.
     auto handOver = [&] { server.close(); instanceLock.unlock(); };
